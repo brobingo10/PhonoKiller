@@ -14,7 +14,8 @@ MACE model name or local checkpoint path, and asks for optional JSON overrides
 for each workflow-settings section. It then builds the YAML configuration for
 you. No prepared YAML file is required. Mori does not write that generated
 configuration, create workflow files, or load the calculator until the run is
-confirmed.
+confirmed. Mori's portrait is shown once when the guide opens; later prompts
+remain text-only.
 
 ```console
 phonokiller
@@ -35,6 +36,12 @@ The optional CLI values are `--format` for an explicit ASE input format,
 `--no-resume` to prohibit reuse of matching checkpoints. Incomplete commands
 received through non-interactive input fail with exit code `2` instead of
 waiting for answers.
+
+After launch, the CLI streams `PHONOKILLER>` progress lines for optimizer
+steps, finite-displacement force calculations, Phonopy mesh construction,
+candidate relaxations, deduplication, selection, resume, and termination.
+Output is flushed immediately so long calculations remain observable on remote
+servers and in job logs.
 
 MACE is the default calculator. Its default is the MACE-MP `medium` model on
 `cuda` with `float32` precision and no added dispersion correction. Install a
@@ -104,6 +111,12 @@ built-in MACE factory directly:
 from phonokiller import RunConfig, run_workflow
 from phonokiller.calculators import make_mace_calculator
 
-result = run_workflow(atoms, make_mace_calculator, RunConfig(), "search-run")
+result = run_workflow(
+    atoms,
+    make_mace_calculator,
+    RunConfig(),
+    "search-run",
+    progress=print,  # Optional; omit for a silent Python API call.
+)
 print(result.status, result.artifacts.history)
 ```

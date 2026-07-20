@@ -27,6 +27,7 @@ from .models import (
     CandidateResult,
     DistortionCandidate,
     DuplicateGroup,
+    ProgressCallback,
 )
 from .relaxation import relax_atoms
 from .structure import load_structure, validate_structure
@@ -49,6 +50,7 @@ def reduce_candidates(
     *,
     iteration_index: int,
     resume: bool = True,
+    progress: ProgressCallback | None = None,
 ) -> CandidateReductionResult:
     """Relax exact generated candidates and deduplicate non-ideal primitives."""
 
@@ -81,7 +83,16 @@ def reduce_candidates(
     try:
         manifest.update(status="running", error=None)
         _atomic_json(artifacts.manifest, manifest)
+        if progress is not None:
+            progress(
+                f"Candidate relaxation: processing {len(candidates)} generated "
+                "structure(s) sequentially."
+            )
         for candidate_index, candidate in enumerate(candidates):
+            label = (
+                f"Candidate {candidate_index + 1}/{len(candidates)} "
+                f"({candidate.candidate_id})"
+            )
             manifest["stage"] = f"candidate:{candidate_index}"
             checkpoint = _result_path(artifacts, candidate_index)
             if resume and checkpoint.exists():
@@ -94,9 +105,13 @@ def reduce_candidates(
                     successful.append(resumed)
                     manifest["checkpoints"][candidate_index] = "success"
                     _atomic_json(artifacts.manifest, manifest)
+                    if progress is not None:
+                        progress(f"{label}: reused successful checkpoint.")
                     continue
                 _archive_failed_result(checkpoint)
             try:
+                if progress is not None:
+                    progress(f"{label}: relaxation started.")
                 completed = _process_candidate(
                     candidate,
                     candidate_index,
@@ -104,6 +119,7 @@ def reduce_candidates(
                     config,
                     artifacts,
                     iteration_index=iteration_index,
+                    progress=progress,
                 )
             except Exception as exc:
                 failed = CandidateResult(
@@ -116,14 +132,29 @@ def reduce_candidates(
                 _atomic_json(checkpoint, _candidate_payload(failed))
                 results.append(failed)
                 manifest["checkpoints"][candidate_index] = "failed"
+                if progress is not None:
+                    progress(f"{label}: failed ({type(exc).__name__}: {exc}).")
             else:
                 results.append(completed.result)
                 successful.append(completed)
                 manifest["checkpoints"][candidate_index] = "success"
+                if progress is not None:
+                    progress(
+                        f"{label}: complete; energy "
+                        f"{float(completed.result.energy_per_atom_eV):.8f} eV/atom; "
+                        f"max force "
+                        f"{float(completed.result.max_force_eV_per_A):.6f} "
+                        "eV/Angstrom."
+                    )
             _atomic_json(artifacts.manifest, manifest)
 
         manifest["stage"] = "deduplication"
         _atomic_json(artifacts.manifest, manifest)
+        if progress is not None:
+            progress(
+                f"Deduplication: comparing {len(successful)} successful "
+                "primitive structure(s)."
+            )
         groups, unique_structures = _deduplicate(successful, config, artifacts)
         status: Literal["complete", "partial"] = (
             "complete" if len(successful) == len(candidates) else "partial"
@@ -131,6 +162,11 @@ def reduce_candidates(
         _write_summary(results, groups, status, artifacts)
         manifest.update(status=status, stage="complete", error=None)
         _atomic_json(artifacts.manifest, manifest)
+        if progress is not None:
+            progress(
+                f"Deduplication complete: {len(groups)} unique structure(s); "
+                f"{len(candidates) - len(successful)} candidate failure(s)."
+            )
         return CandidateReductionResult(
             status=status,
             candidates=results,
@@ -258,6 +294,7 @@ def _process_candidate(
     artifacts: CandidateReductionArtifactPaths,
     *,
     iteration_index: int,
+    progress: ProgressCallback | None,
 ) -> _SuccessfulCandidate:
     directory = _candidate_dir(artifacts, candidate_index)
     directory.mkdir(parents=True, exist_ok=True)
@@ -278,6 +315,7 @@ def _process_candidate(
         ),
         relaxed_structure=relaxation_dir / "relaxed.extxyz",
         trajectory_path=relaxation_dir / "trajectory.traj",
+        progress=progress,
     )
     if Counter(_decoration_tokens(outcome.atoms)) != original_composition:
         raise CandidateReductionError("candidate relaxation changed the composition")

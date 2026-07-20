@@ -112,6 +112,7 @@ def test_guide_reviews_supplied_defaults_and_confirms(tmp_path) -> None:
     assert "The index argument" in transcript
     assert "Resume reuses checkpoints" in transcript
     assert "Resolved run arguments:" in transcript
+    assert transcript.count(_MORI_PORTRAIT[0].rstrip()) == 1
 
 
 def test_invalid_frame_index_is_explained_and_reprompted(tmp_path) -> None:
@@ -376,7 +377,12 @@ def test_guided_main_launches_only_after_confirmation(monkeypatch, tmp_path) -> 
     assert len(calls) == 1
     assert calls[0][0][0] == structure
     assert calls[0][0][3] == output
-    assert calls[0][1] == {"resume": True, "format": None, "index": -1}
+    assert calls[0][1] == {
+        "resume": True,
+        "format": None,
+        "index": -1,
+        "progress": cli._print_progress,
+    }
 
 
 def test_guided_main_refusal_does_not_load_calculator(monkeypatch, tmp_path) -> None:

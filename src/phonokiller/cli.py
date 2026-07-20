@@ -77,6 +77,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             resume=not args.no_resume,
             format=args.format,
             index=args.index,
+            progress=_print_progress,
         )
     except Exception as exc:
         print(f"phonokiller: error: {exc}", file=sys.stderr)
@@ -90,6 +91,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     print(f"Search history: {result.artifacts.history}")
     return 1
+
+
+def _print_progress(message: str) -> None:
+    """Write one immediately visible workflow progress event."""
+
+    print(f"PHONOKILLER> {message}", flush=True)
 
 
 def _build_parser() -> argparse.ArgumentParser:

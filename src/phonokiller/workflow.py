@@ -41,6 +41,7 @@ from .models import (
     CalculatorFactory,
     IterationSummary,
     MeshData,
+    ProgressCallback,
     RunResult,
     RunStatus,
 )
@@ -86,11 +87,18 @@ def run_workflow(
     *,
     format: str | None = None,
     index: int | str = -1,
+    progress: ProgressCallback | None = None,
 ) -> RunResult:
     """Run the complete iterative search until stable or safely terminated."""
 
+    _report(progress, "Loading and validating the input structure and configuration.")
     run_config = config if isinstance(config, RunConfig) else RunConfig.model_validate(config)
     input_atoms = load_structure(structure, format=format, index=index)
+    _report(
+        progress,
+        f"Input validated: {len(input_atoms)} atom(s); output directory "
+        f"{Path(output_dir).resolve()}.",
+    )
     artifacts = _artifact_paths(Path(output_dir).resolve())
     fingerprint_payload = _fingerprint_payload(input_atoms, run_config, calculator)
     fingerprint = _hash_payload(fingerprint_payload)
@@ -114,6 +122,10 @@ def run_workflow(
         )
     )
     if terminal_status is not None:
+        _report(
+            progress,
+            f"Resume: terminal workflow checkpoint found ({terminal_status}).",
+        )
         _repair_terminal_artifacts(
             manifest,
             artifacts,
@@ -127,6 +139,11 @@ def run_workflow(
         _atomic_json(artifacts.manifest, manifest)
         while True:
             iteration_index = len(history)
+            _report(
+                progress,
+                f"Phonopy evaluation {iteration_index + 1}/"
+                f"{run_config.search.max_evaluations} started.",
+            )
             paths = _iteration_paths(artifacts, iteration_index)
             paths.directory.mkdir(parents=True, exist_ok=True)
             manifest["stage"] = f"iteration:{iteration_index}:structure"
@@ -138,6 +155,7 @@ def run_workflow(
                     calculator,
                     run_config,
                     paths,
+                    progress=progress,
                 )
             else:
                 previous = history[-1]
@@ -146,10 +164,26 @@ def run_workflow(
                 parent_energy_per_atom = float(previous["selected_energy_per_atom_eV"])
                 if not paths.evaluated_structure.exists():
                     write(paths.evaluated_structure, evaluated, format="extxyz")
+                _report(
+                    progress,
+                    f"Evaluation {iteration_index + 1}: loaded the previously "
+                    "selected structure.",
+                )
 
             if not paths.accepted_primitive.exists():
+                _report(
+                    progress,
+                    f"Evaluation {iteration_index + 1}: reducing the accepted "
+                    "structure to a non-ideal primitive cell.",
+                )
                 accepted = make_nonideal_primitive(evaluated, run_config)
                 write(paths.accepted_primitive, accepted, format="extxyz")
+            else:
+                _report(
+                    progress,
+                    f"Evaluation {iteration_index + 1}: reused primitive-cell "
+                    "checkpoint.",
+                )
 
             manifest["stage"] = f"iteration:{iteration_index}:phonopy"
             _atomic_json(artifacts.manifest, manifest)
@@ -160,9 +194,15 @@ def run_workflow(
                 paths,
                 iteration_index=iteration_index,
                 resume=resume,
+                progress=progress,
             )
             groups = rank_soft_modes(mesh, run_config.soft_modes)
             minimum_frequency = float(np.min(mesh.frequencies))
+            _report(
+                progress,
+                f"Evaluation {iteration_index + 1}: minimum frequency "
+                f"{minimum_frequency:.6f} THz; {len(groups)} unstable mode group(s).",
+            )
             base_entry = {
                 "index": iteration_index,
                 "evaluated_structure": str(paths.evaluated_structure),
@@ -194,6 +234,11 @@ def run_workflow(
                 _write_history(artifacts, history)
                 _export_final(artifacts, paths, evaluated, run_config)
                 _finish_manifest(manifest, artifacts, "stable", history)
+                _report(
+                    progress,
+                    f"Workflow stable after {len(history)} Phonopy evaluation(s); "
+                    "final artifacts exported.",
+                )
                 return _result_from_components(
                     "stable", evaluated, phonon, mesh, history, artifacts
                 )
@@ -204,12 +249,22 @@ def run_workflow(
                 history.append(entry)
                 _write_history(artifacts, history)
                 _finish_manifest(manifest, artifacts, "max_evaluations", history)
+                _report(
+                    progress,
+                    f"Search stopped at the limit of {len(history)} Phonopy "
+                    "evaluation(s); unstable modes remain.",
+                )
                 return _result_from_components(
                     "max_evaluations", evaluated, phonon, mesh, history, artifacts
                 )
 
             manifest["stage"] = f"iteration:{iteration_index}:instabilities"
             _atomic_json(artifacts.manifest, manifest)
+            _report(
+                progress,
+                f"Evaluation {iteration_index + 1}: generating distortions from "
+                "ranked unstable modes.",
+            )
             soft_result = generate_soft_mode_candidates(
                 phonon,
                 mesh,
@@ -217,6 +272,11 @@ def run_workflow(
                 paths.instabilities_dir,
                 max_candidates=run_config.search.max_candidates_per_iteration,
                 source_fingerprint=manifest["fingerprint"],
+            )
+            _report(
+                progress,
+                f"Evaluation {iteration_index + 1}: generated "
+                f"{len(soft_result.candidates)} candidate distortion(s).",
             )
 
             manifest["stage"] = f"iteration:{iteration_index}:candidates"
@@ -228,6 +288,7 @@ def run_workflow(
                 paths.candidates_dir,
                 iteration_index=iteration_index,
                 resume=resume,
+                progress=progress,
             )
             successful = [item for item in reduced.candidates if item.status == "success"]
             if not successful:
@@ -249,6 +310,12 @@ def run_workflow(
             assert winner.primitive_atoms is not None
             write(paths.selected_structure, winner.primitive_atoms, format="extxyz")
             energy_change = float(winner.energy_per_atom_eV) - parent_energy_per_atom
+            _report(
+                progress,
+                f"Selection: {winner.candidate_id} ranked first at "
+                f"{float(winner.energy_per_atom_eV):.8f} eV/atom "
+                f"(change {energy_change:+.8f} eV/atom).",
+            )
             ranking = sorted(
                 representatives,
                 key=lambda item: (
@@ -315,6 +382,11 @@ def run_workflow(
                 history.append(entry)
                 _write_history(artifacts, history)
                 _finish_manifest(manifest, artifacts, "cycle_detected", history)
+                _report(
+                    progress,
+                    f"Search stopped: selected structure matches evaluation "
+                    f"{cycle_index + 1}; cycle detected.",
+                )
                 return _result_from_components(
                     "cycle_detected", evaluated, phonon, mesh, history, artifacts
                 )
@@ -324,7 +396,17 @@ def run_workflow(
             manifest["completed_evaluations"] = len(history)
             manifest["stage"] = f"iteration:{iteration_index}:complete"
             _atomic_json(artifacts.manifest, manifest)
+            _report(
+                progress,
+                f"Evaluation {iteration_index + 1} complete; continuing with "
+                "the selected structure.",
+            )
     except BaseException as exc:
+        _report(
+            progress,
+            f"Workflow failed during {manifest.get('stage', 'initialization')}: "
+            f"{type(exc).__name__}: {exc}.",
+        )
         manifest.update(
             status="failed",
             error={"type": type(exc).__name__, "message": str(exc)},
@@ -384,12 +466,20 @@ def _initial_relaxation(
     calculator: Calculator | Callable[..., Calculator],
     config: RunConfig,
     paths: _IterationPaths,
+    *,
+    progress: ProgressCallback | None,
 ) -> tuple[Atoms, float]:
     metrics_path = paths.relaxation_dir / "metrics.json"
     if paths.relaxation_structure.exists() and metrics_path.exists():
+        _report(progress, "Initial relaxation: reused completed checkpoint.")
         relaxed = load_structure(paths.relaxation_structure)
         metrics = _read_json(metrics_path)
     else:
+        _report(
+            progress,
+            f"Initial relaxation started with {config.relaxation.optimizer.value}; "
+            f"force tolerance {config.relaxation.force_tolerance:g} eV/Angstrom.",
+        )
         outcome = relax_atoms(
             atoms,
             calculator,
@@ -401,9 +491,16 @@ def _initial_relaxation(
             ),
             relaxed_structure=paths.relaxation_structure,
             trajectory_path=paths.relaxation_trajectory,
+            progress=progress,
         )
         relaxed = outcome.atoms
         metrics = outcome.metrics
+        _report(
+            progress,
+            f"Initial relaxation complete in {int(metrics['steps'])} step(s); "
+            f"energy {float(metrics['energy_eV']):.8f} eV; max force "
+            f"{float(metrics['max_force_eV_per_A']):.6f} eV/Angstrom.",
+        )
     if not paths.evaluated_structure.exists():
         write(paths.evaluated_structure, relaxed, format="extxyz")
     return relaxed, float(metrics["energy_eV"]) / len(relaxed)
@@ -417,6 +514,7 @@ def _run_phonopy_evaluation(
     *,
     iteration_index: int,
     resume: bool,
+    progress: ProgressCallback | None,
 ) -> tuple[Phonopy, MeshData, dict[str, Any]]:
     complete_files = (
         paths.phonopy_parameters,
@@ -426,6 +524,10 @@ def _run_phonopy_evaluation(
         paths.phonopy_settings,
     )
     if all(path.exists() for path in complete_files):
+        _report(
+            progress,
+            f"Evaluation {iteration_index + 1}: reused complete Phonopy checkpoint.",
+        )
         phonon, mesh = _load_phonopy_result(paths)
         return phonon, mesh, _read_json(paths.phonopy_settings)
 
@@ -435,11 +537,22 @@ def _run_phonopy_evaluation(
     matrix, heights, spans, atom_count = automatic_supercell_matrix(
         atoms, config.phonopy.minimum_supercell_span_angstrom
     )
+    _report(
+        progress,
+        f"Evaluation {iteration_index + 1}: finite-displacement supercell "
+        f"repetitions {np.diag(matrix).tolist()}, {atom_count} atom(s), spans "
+        f"{np.round(spans, 4).tolist()} Angstrom.",
+    )
     phonon = Phonopy(ase_to_phonopy(atoms), supercell_matrix=matrix)
     phonon.generate_displacements()
     displaced_supercells = phonon.supercells_with_displacements
     if not displaced_supercells:
         raise DisplacementError("Phonopy generated no displaced supercells")
+    _report(
+        progress,
+        f"Evaluation {iteration_index + 1}: Phonopy generated "
+        f"{len(displaced_supercells)} finite displacement(s).",
+    )
     phonopy_manifest = (
         _read_json(paths.phonopy_manifest)
         if paths.phonopy_manifest.exists()
@@ -460,6 +573,11 @@ def _run_phonopy_evaluation(
         metadata_path = directory / "result.json"
         structure_hash = _hash_payload(_atoms_payload(supercell))
         if result_path.exists() and metadata_path.exists() and resume:
+            _report(
+                progress,
+                f"Displacement {displacement_index + 1}/"
+                f"{len(displaced_supercells)}: reusing force checkpoint.",
+            )
             force = _load_displacement_checkpoint(
                 result_path,
                 metadata_path,
@@ -473,6 +591,12 @@ def _run_phonopy_evaluation(
                     f"incomplete displacement checkpoint {displacement_index}"
                 )
             write(structure_path, supercell, format="extxyz")
+            _report(
+                progress,
+                f"Displacement {displacement_index + 1}/"
+                f"{len(displaced_supercells)}: calculating forces for "
+                f"{len(supercell)} atom(s).",
+            )
             supercell.calc = calculator_for(
                 calculator,
                 CalculationContext(
@@ -496,12 +620,18 @@ def _run_phonopy_evaluation(
                 structure_hash,
                 force,
             )
+            _report(
+                progress,
+                f"Displacement {displacement_index + 1}/"
+                f"{len(displaced_supercells)}: force checkpoint saved.",
+            )
         forces.append(force)
         completed.append(displacement_index)
         phonopy_manifest["completed_displacements"] = completed.copy()
         _atomic_json(paths.phonopy_manifest, phonopy_manifest)
 
     phonon.forces = np.asarray(forces, dtype=float)
+    _report(progress, "Producing finite-displacement force constants with Phonopy.")
     phonon.produce_force_constants()
     if phonon.force_constants is None or not np.all(np.isfinite(phonon.force_constants)):
         raise DisplacementError("Phonopy produced invalid force constants")
@@ -510,6 +640,11 @@ def _run_phonopy_evaluation(
         settings={"force_sets": True, "displacements": True, "force_constants": True},
     )
     write_FORCE_CONSTANTS(phonon.force_constants, filename=str(paths.force_constants))
+    _report(
+        progress,
+        f"Running Phonopy mesh with scalar length "
+        f"{float(config.phonopy.mesh_length):g} and eigenvectors enabled.",
+    )
     mesh_result = phonon.run_mesh(
         float(config.phonopy.mesh_length), with_eigenvectors=True
     )
@@ -531,6 +666,11 @@ def _run_phonopy_evaluation(
         and np.all(np.isfinite(mesh.eigenvectors.imag))
     ):
         raise DisplacementError("Phonopy mesh contains non-finite values")
+    _report(
+        progress,
+        f"Phonopy mesh complete: grid {mesh.mesh_numbers.tolist()}; "
+        f"{len(mesh.qpoints)} irreducible q-point(s).",
+    )
     mesh_result.write_yaml(filename=str(paths.mesh_yaml))
     _atomic_npz(
         paths.mesh_arrays,
@@ -555,6 +695,11 @@ def _run_phonopy_evaluation(
     phonopy_manifest.update(status="complete", completed_displacements=completed)
     _atomic_json(paths.phonopy_manifest, phonopy_manifest)
     return phonon, mesh, metadata
+
+
+def _report(progress: ProgressCallback | None, message: str) -> None:
+    if progress is not None:
+        progress(message)
 
 
 def _load_phonopy_result(paths: _IterationPaths) -> tuple[Phonopy, MeshData]:

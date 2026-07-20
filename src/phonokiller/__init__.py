@@ -32,6 +32,7 @@ from .models import (
     CalculatorFactory,
     IterationSummary,
     MeshData,
+    ProgressCallback,
     RunResult,
     RunStatus,
 )
@@ -58,6 +59,7 @@ __all__ = [
     "OutputDirectoryError",
     "PhonoKillerError",
     "PhonopyConfig",
+    "ProgressCallback",
     "RelaxationConfig",
     "RelaxationError",
     "RelaxationMode",

@@ -100,6 +100,26 @@ class GuidedRunArguments:
     generated_config: RunConfig | None = None
 
 
+@dataclass(slots=True)
+class _MoriGuide:
+    """Render the portrait once, then continue with text-only dialogue turns."""
+
+    stream: TextIO
+    width: int
+    use_color: bool
+    portrait_shown: bool = False
+
+    def turn(self, message: str) -> None:
+        render_turn(
+            message,
+            self.stream,
+            width=self.width,
+            use_color=self.use_color,
+            show_portrait=not self.portrait_shown,
+        )
+        self.portrait_shown = True
+
+
 def interactive_terminal_available(stream: TextIO) -> bool:
     """Return whether *stream* supports an interactive conversation."""
 
@@ -128,8 +148,16 @@ def render_turn(
     *,
     width: int,
     use_color: bool,
+    show_portrait: bool = True,
 ) -> None:
-    """Render one compact Mori portrait and an informative dialogue turn."""
+    """Render an informative Mori dialogue turn, optionally with the portrait."""
+
+    if not show_portrait:
+        stream.write("\n")
+        for line in _dialogue_lines(message, width):
+            stream.write(line.rstrip() + "\n")
+        stream.flush()
+        return
 
     side_by_side = width >= _SIDE_BY_SIDE_MINIMUM
     dialogue_width = max(24, width - _PORTRAIT_WIDTH - 3) if side_by_side else width
@@ -166,6 +194,7 @@ def collect_run_arguments(
 ) -> GuidedRunArguments | None:
     """Review every run argument and return confirmed values, or ``None``."""
 
+    guide = _MoriGuide(stream=stream, width=width, use_color=use_color)
     try:
         selected_structure = _ask_value(
             "The structure argument identifies one ASE-readable crystal file. "
@@ -174,16 +203,12 @@ def collect_run_arguments(
             _display_path(structure),
             _existing_file,
             input_fn,
-            stream,
-            width,
-            use_color,
+            guide,
         )
         selected_config, generated_config = _collect_configuration(
             config,
             input_fn,
-            stream,
-            width,
-            use_color,
+            guide,
         )
         selected_output = _ask_value(
             "The output argument selects the workflow directory for checkpoints, "
@@ -193,9 +218,7 @@ def collect_run_arguments(
             _display_path(output) or "phonokiller-run",
             _output_directory,
             input_fn,
-            stream,
-            width,
-            use_color,
+            guide,
         )
         selected_format = _ask_value(
             "The format argument optionally forces an ASE input format. Use 'auto' "
@@ -204,9 +227,7 @@ def collect_run_arguments(
             format or "auto",
             _ase_format,
             input_fn,
-            stream,
-            width,
-            use_color,
+            guide,
         )
         selected_index = _ask_value(
             "The index argument selects one integer frame from a multi-frame file. "
@@ -215,9 +236,7 @@ def collect_run_arguments(
             str(index),
             _frame_index,
             input_fn,
-            stream,
-            width,
-            use_color,
+            guide,
         )
         resume = _ask_value(
             "Resume reuses checkpoints only when the structure, configuration, "
@@ -227,9 +246,7 @@ def collect_run_arguments(
             "no" if no_resume else "yes",
             _yes_or_no,
             input_fn,
-            stream,
-            width,
-            use_color,
+            guide,
         )
         resolved = GuidedRunArguments(
             structure=selected_structure,
@@ -240,17 +257,12 @@ def collect_run_arguments(
             no_resume=not resume,
             generated_config=generated_config,
         )
-        render_turn(_summary(resolved), stream, width=width, use_color=use_color)
-        confirmed = _ask_confirmation(input_fn, stream, width, use_color)
+        guide.turn(_summary(resolved))
+        confirmed = _ask_confirmation(input_fn, guide)
     except (EOFError, KeyboardInterrupt) as exc:
         raise InteractiveCancelled from exc
     if not confirmed:
-        render_turn(
-            "The workflow was not started. No workflow artifacts were created.",
-            stream,
-            width=width,
-            use_color=use_color,
-        )
+        guide.turn("The workflow was not started. No workflow artifacts were created.")
         return None
     return resolved
 
@@ -271,9 +283,7 @@ def write_generated_configuration(path: Path, config: RunConfig) -> None:
 def _collect_configuration(
     initial: Path | None,
     input_fn: Callable[[], str],
-    stream: TextIO,
-    width: int,
-    use_color: bool,
+    guide: _MoriGuide,
 ) -> tuple[Path, RunConfig | None]:
     if initial is not None and initial.is_file():
         selected = _ask_value(
@@ -284,9 +294,7 @@ def _collect_configuration(
             str(initial),
             _configuration_file,
             input_fn,
-            stream,
-            width,
-            use_color,
+            guide,
         )
         return selected, None
 
@@ -298,17 +306,13 @@ def _collect_configuration(
         str(initial) if initial is not None else str(_available_config_destination()),
         _configuration_destination,
         input_fn,
-        stream,
-        width,
-        use_color,
+        guide,
     )
-    generated = _build_configuration(input_fn, stream, width, use_color)
+    generated = _build_configuration(input_fn, guide)
     return destination, generated
 
 
-def _build_configuration(
-    input_fn: Callable[[], str], stream: TextIO, width: int, use_color: bool
-) -> RunConfig:
+def _build_configuration(input_fn: Callable[[], str], guide: _MoriGuide) -> RunConfig:
     model = _ask_value(
         "PhonoKiller uses MACE by default. Enter a MACE-MP model name, such as "
         "'small', 'medium', or 'large', or an existing local .model checkpoint "
@@ -318,9 +322,7 @@ def _build_configuration(
         DEFAULT_MACE_MODEL,
         _mace_model,
         input_fn,
-        stream,
-        width,
-        use_color,
+        guide,
     )
     payload: dict[str, object] = {
         "calculator": {
@@ -340,9 +342,7 @@ def _build_configuration(
             "{}",
             _validated_section(section),
             input_fn,
-            stream,
-            width,
-            use_color,
+            guide,
         )
     return RunConfig.model_validate(payload)
 
@@ -353,60 +353,38 @@ def _ask_value(
     default: str | None,
     parser: Callable[[str], _T],
     input_fn: Callable[[], str],
-    stream: TextIO,
-    width: int,
-    use_color: bool,
+    guide: _MoriGuide,
 ) -> _T:
     while True:
-        render_turn(explanation, stream, width=width, use_color=use_color)
+        guide.turn(explanation)
         suffix = f" [{default}]" if default is not None else ""
-        stream.write(f"MORI> {prompt}{suffix}: ")
-        stream.flush()
+        guide.stream.write(f"MORI> {prompt}{suffix}: ")
+        guide.stream.flush()
         response = input_fn().strip()
         candidate = response or default
         if candidate is None:
-            render_turn(
-                "A value is required for this argument.",
-                stream,
-                width=width,
-                use_color=use_color,
-            )
+            guide.turn("A value is required for this argument.")
             continue
         try:
             return parser(candidate)
         except ValueError as exc:
-            render_turn(
-                f"The value is invalid: {exc}",
-                stream,
-                width=width,
-                use_color=use_color,
-            )
+            guide.turn(f"The value is invalid: {exc}")
 
 
-def _ask_confirmation(
-    input_fn: Callable[[], str], stream: TextIO, width: int, use_color: bool
-) -> bool:
+def _ask_confirmation(input_fn: Callable[[], str], guide: _MoriGuide) -> bool:
     while True:
-        render_turn(
+        guide.turn(
             "Starting now will load the calculator and begin relaxation and force "
-            "calculations. Enter yes to start; a blank response does not start the run.",
-            stream,
-            width=width,
-            use_color=use_color,
+            "calculations. Enter yes to start; a blank response does not start the run."
         )
-        stream.write("MORI> Start the workflow? [no]: ")
-        stream.flush()
+        guide.stream.write("MORI> Start the workflow? [no]: ")
+        guide.stream.flush()
         response = input_fn().strip().lower()
         if response in {"yes", "y"}:
             return True
         if response in {"", "no", "n"}:
             return False
-        render_turn(
-            "The confirmation must be yes or no.",
-            stream,
-            width=width,
-            use_color=use_color,
-        )
+        guide.turn("The confirmation must be yes or no.")
 
 
 def _dialogue_lines(message: str, width: int) -> list[str]:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Protocol, TYPE_CHECKING, runtime_checkable
+from typing import Any, Callable, Literal, Protocol, TYPE_CHECKING, runtime_checkable
 
 import numpy as np
 from ase import Atoms
@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
 
 RunStatus = Literal["stable", "cycle_detected", "max_evaluations"]
+ProgressCallback = Callable[[str], None]
 
 
 @dataclass(frozen=True, slots=True)

@@ -84,6 +84,34 @@ def test_stable_end_to_end_exports_and_resumes(tmp_path) -> None:
     np.testing.assert_allclose(resumed.mesh.frequencies, loaded.mesh.frequencies)
 
 
+def test_workflow_reports_live_progress_and_terminal_resume(tmp_path) -> None:
+    output = tmp_path / "run"
+    events: list[str] = []
+    run_workflow(
+        simple_crystal(),
+        ZeroCalculator(),
+        fast_config(),
+        output,
+        progress=events.append,
+    )
+    assert any("Initial relaxation started" in event for event in events)
+    assert any("Initial relaxation: step" in event for event in events)
+    assert any("Phonopy generated" in event for event in events)
+    assert any("Displacement 1/" in event for event in events)
+    assert any("Phonopy mesh complete" in event for event in events)
+    assert events[-1].startswith("Workflow stable")
+
+    resumed_events: list[str] = []
+    run_workflow(
+        simple_crystal(),
+        ZeroCalculator(),
+        fast_config(),
+        output,
+        progress=resumed_events.append,
+    )
+    assert any("terminal workflow checkpoint found" in event for event in resumed_events)
+
+
 def test_loading_terminal_result_does_not_recompute_mesh(monkeypatch, tmp_path) -> None:
     output = tmp_path / "run"
     run_workflow(simple_crystal(), ZeroCalculator(), fast_config(), output)

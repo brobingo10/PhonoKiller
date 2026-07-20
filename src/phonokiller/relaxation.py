@@ -18,7 +18,7 @@ import numpy as np
 
 from .config import OptimizerName, RelaxationConfig, RelaxationMode
 from .exceptions import CalculatorValidationError, RelaxationError
-from .models import CalculationContext
+from .models import CalculationContext, ProgressCallback
 
 
 _OPTIMIZERS: dict[OptimizerName, type] = {
@@ -70,6 +70,7 @@ def relax_atoms(
     context: CalculationContext,
     relaxed_structure: Path,
     trajectory_path: Path,
+    progress: ProgressCallback | None = None,
 ) -> RelaxationOutcome:
     """Relax one structure and write the standard relaxation artifacts."""
 
@@ -95,6 +96,11 @@ def relax_atoms(
         restart=str(restart),
     )
     optimizer.attach(trajectory.write, interval=1)
+    if progress is not None:
+        optimizer.attach(
+            lambda: _report_progress(atoms, optimizer, config, context, progress),
+            interval=1,
+        )
     try:
         converged = bool(
             optimizer.run(fmax=config.force_tolerance, steps=config.max_steps)
@@ -119,6 +125,29 @@ def relax_atoms(
             f"eV/Angstrom within {config.max_steps} steps"
         )
     return RelaxationOutcome(atoms=relaxed, metrics=metrics)
+
+
+def _report_progress(
+    atoms: Atoms,
+    optimizer: Any,
+    config: RelaxationConfig,
+    context: CalculationContext,
+    progress: ProgressCallback,
+) -> None:
+    """Report one cached optimizer state without changing optimizer behavior."""
+
+    energy = float(atoms.get_potential_energy())
+    forces = np.asarray(atoms.get_forces(), dtype=float)
+    max_force = float(np.linalg.norm(forces, axis=1).max())
+    if context.candidate_index is None:
+        label = "Initial relaxation"
+    else:
+        candidate = context.candidate_id or str(context.candidate_index)
+        label = f"Candidate {context.candidate_index + 1} ({candidate})"
+    progress(
+        f"{label}: step {optimizer.get_number_of_steps()}/{config.max_steps}; "
+        f"energy {energy:.8f} eV; max force {max_force:.6f} eV/Angstrom."
+    )
 
 
 def _archive_failed_relaxation(relaxation_dir: Path) -> None:
