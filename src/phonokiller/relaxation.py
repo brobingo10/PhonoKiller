@@ -36,6 +36,13 @@ class RelaxationOutcome:
     metrics: dict[str, Any]
 
 
+@dataclass(frozen=True, slots=True)
+class _CalculatorDeviceInfo:
+    device: str | None
+    gpu_active: bool | None
+    source: str
+
+
 def calculator_for(
     provider: Calculator | Callable[..., Calculator], context: CalculationContext
 ) -> Calculator:
@@ -80,6 +87,9 @@ def relax_atoms(
     atoms = input_atoms.copy()
     atoms.calc = calculator_for(provider, context)
     _validate_initial_calculator(atoms, config.mode)
+    device_info = _calculator_device_info(atoms.calc)
+    if progress is not None and context.stage == "candidate_relaxation":
+        progress(_candidate_device_message(context, device_info))
 
     target: Any = atoms
     if config.mode is RelaxationMode.FULL_CELL:
@@ -115,6 +125,9 @@ def relax_atoms(
 
     metrics = _relaxation_metrics(atoms, optimizer.get_number_of_steps())
     metrics["converged"] = converged
+    metrics["calculator_device"] = device_info.device
+    metrics["gpu_active"] = device_info.gpu_active
+    metrics["calculator_device_source"] = device_info.source
     _atomic_json(relaxation_dir / "metrics.json", metrics)
     relaxed = atoms.copy()
     relaxed.calc = None
@@ -125,6 +138,70 @@ def relax_atoms(
             f"eV/Angstrom within {config.max_steps} steps"
         )
     return RelaxationOutcome(atoms=relaxed, metrics=metrics)
+
+
+def _calculator_device_info(calculator: Calculator) -> _CalculatorDeviceInfo:
+    """Inspect the actual model placement where a calculator exposes it."""
+
+    model_devices: list[str] = []
+    models = getattr(calculator, "models", None)
+    if models is not None:
+        for model in models if isinstance(models, (list, tuple)) else [models]:
+            try:
+                parameter = next(model.parameters())
+            except (AttributeError, StopIteration, TypeError):
+                continue
+            model_devices.append(str(parameter.device).lower())
+    if model_devices:
+        unique_devices = sorted(set(model_devices))
+        device = ",".join(unique_devices)
+        return _CalculatorDeviceInfo(
+            device=device,
+            gpu_active=all(_is_gpu_device(item) for item in unique_devices),
+            source="model_parameters",
+        )
+
+    reported_device = getattr(calculator, "device", None)
+    if reported_device is None:
+        return _CalculatorDeviceInfo(
+            device=None,
+            gpu_active=None,
+            source="unavailable",
+        )
+    device = str(reported_device).lower()
+    return _CalculatorDeviceInfo(
+        device=device,
+        gpu_active=_is_gpu_device(device),
+        source="calculator",
+    )
+
+
+def _is_gpu_device(device: str) -> bool:
+    return device.startswith(("cuda", "xpu", "mps"))
+
+
+def _candidate_device_message(
+    context: CalculationContext, device_info: _CalculatorDeviceInfo
+) -> str:
+    candidate_index = (
+        context.candidate_index if context.candidate_index is not None else 0
+    )
+    candidate = context.candidate_id or str(candidate_index)
+    label = f"Candidate {candidate_index + 1} ({candidate})"
+    if device_info.gpu_active is True:
+        return (
+            f"{label}: first force evaluation completed on "
+            f"{device_info.device}; GPU execution confirmed."
+        )
+    if device_info.gpu_active is False:
+        return (
+            f"{label}: first force evaluation completed on "
+            f"{device_info.device}; GPU is not active."
+        )
+    return (
+        f"{label}: first force evaluation completed, but this calculator does "
+        "not expose its execution device; GPU use could not be verified."
+    )
 
 
 def _report_progress(

@@ -41,7 +41,11 @@ After launch, the CLI streams `PHONOKILLER>` progress lines for optimizer
 steps, finite-displacement force calculations, Phonopy mesh construction,
 candidate relaxations, deduplication, selection, resume, and termination.
 Output is flushed immediately so long calculations remain observable on remote
-servers and in job logs.
+servers and in job logs. For every candidate relaxation, PhonoKiller inspects
+the calculator's actual model-parameter device after the first force evaluation
+and reports whether GPU execution is confirmed. The detected device,
+verification result, and detection source are also stored in that candidate's
+`relaxation/metrics.json`.
 
 MACE is the default calculator. Its default is the MACE-MP `medium` model on
 `cuda` with `float32` precision and no added dispersion correction. Install a
