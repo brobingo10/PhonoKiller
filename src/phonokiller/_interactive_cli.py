@@ -14,7 +14,15 @@ from uuid import uuid4
 
 import yaml
 
-from .config import RunConfig, load_run_config
+from .config import (
+    DEFAULT_MACE_DEVICE,
+    DEFAULT_MACE_DISPERSION,
+    DEFAULT_MACE_DTYPE,
+    DEFAULT_MACE_FACTORY,
+    DEFAULT_MACE_MODEL,
+    RunConfig,
+    load_run_config,
+)
 
 
 _MORI_PORTRAIT = (
@@ -270,7 +278,8 @@ def _collect_configuration(
     if initial is not None and initial.is_file():
         selected = _ask_value(
             "The configuration argument identifies an existing PhonoKiller YAML "
-            "file. It defines the calculator factory and all workflow settings.",
+            "file. It defines the MACE calculator selection and all workflow "
+            "settings.",
             "Enter the existing configuration file",
             str(initial),
             _configuration_file,
@@ -300,29 +309,30 @@ def _collect_configuration(
 def _build_configuration(
     input_fn: Callable[[], str], stream: TextIO, width: int, use_color: bool
 ) -> RunConfig:
-    factory = _ask_value(
-        "The calculator factory is an importable 'module:function' that returns "
-        "an ASE Calculator for each workflow calculation context.",
-        "Enter the calculator factory",
-        None,
-        _calculator_factory,
+    model = _ask_value(
+        "PhonoKiller uses MACE by default. Enter a MACE-MP model name, such as "
+        "'small', 'medium', or 'large', or an existing local .model checkpoint "
+        "path. The default uses CUDA and float32; MACE-MP model names are "
+        "downloaded and cached by MACE.",
+        "Enter the MACE model name or path",
+        DEFAULT_MACE_MODEL,
+        _mace_model,
         input_fn,
         stream,
         width,
         use_color,
     )
-    kwargs = _ask_value(
-        "Calculator keyword arguments are passed to the factory. Enter a JSON "
-        "object; use {} when the factory needs no keyword arguments.",
-        "Enter calculator keyword arguments as JSON",
-        "{}",
-        _json_mapping,
-        input_fn,
-        stream,
-        width,
-        use_color,
-    )
-    payload: dict[str, object] = {"calculator": {"factory": factory, "kwargs": kwargs}}
+    payload: dict[str, object] = {
+        "calculator": {
+            "factory": DEFAULT_MACE_FACTORY,
+            "kwargs": {
+                "model": model,
+                "device": DEFAULT_MACE_DEVICE,
+                "default_dtype": DEFAULT_MACE_DTYPE,
+                "dispersion": DEFAULT_MACE_DISPERSION,
+            },
+        }
+    }
     for section, explanation in _configuration_sections():
         payload[section] = _ask_value(
             explanation,
@@ -491,13 +501,27 @@ def _configuration_destination(value: str) -> Path:
     return path
 
 
-def _calculator_factory(value: str) -> str:
+def _mace_model(value: str) -> str:
     selected = value.strip()
-    try:
-        RunConfig.model_validate({"calculator": {"factory": selected, "kwargs": {}}})
-    except Exception as exc:
-        raise ValueError("use the importable module:function syntax") from exc
+    if len(selected) >= 2 and selected[0] == selected[-1] and selected[0] in {'"', "'"}:
+        selected = selected[1:-1].strip()
+    if not selected:
+        raise ValueError("enter a MACE-MP model name or a local model path")
+    path = Path(selected).expanduser()
+    if path.is_file():
+        return str(path.resolve())
+    if _looks_like_path(selected):
+        raise ValueError("the local MACE model path must identify an existing file")
     return selected
+
+
+def _looks_like_path(value: str) -> bool:
+    return (
+        value.startswith((".", "~", "/", "\\"))
+        or "/" in value
+        or "\\" in value
+        or value.endswith(".model")
+    )
 
 
 def _json_mapping(value: str) -> dict[str, object]:

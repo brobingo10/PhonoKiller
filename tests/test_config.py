@@ -4,6 +4,13 @@ import pytest
 from pydantic import ValidationError
 
 from phonokiller import RunConfig
+from phonokiller.config import (
+    DEFAULT_MACE_DEVICE,
+    DEFAULT_MACE_DISPERSION,
+    DEFAULT_MACE_DTYPE,
+    DEFAULT_MACE_FACTORY,
+    DEFAULT_MACE_MODEL,
+)
 
 
 def test_unified_defaults_and_candidate_inheritance() -> None:
@@ -18,6 +25,13 @@ def test_unified_defaults_and_candidate_inheritance() -> None:
     assert config.soft_modes.mean_displacement_angstrom == 0.1
     assert config.search.max_evaluations == 10
     assert config.search.max_candidates_per_iteration == 256
+    assert config.calculator.factory == DEFAULT_MACE_FACTORY
+    assert config.calculator.kwargs == {
+        "model": DEFAULT_MACE_MODEL,
+        "device": DEFAULT_MACE_DEVICE,
+        "default_dtype": DEFAULT_MACE_DTYPE,
+        "dispersion": DEFAULT_MACE_DISPERSION,
+    }
     assert config.effective_candidate_relaxation() == config.relaxation
 
 

@@ -21,6 +21,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+mace = [
+  "mace-torch",
+]
 test = [
   "pytest>=8",
   "pytest-cov>=5",

@@ -17,6 +17,7 @@ from phonokiller._interactive_cli import (
     _configuration_file,
     _frame_index,
     _json_mapping,
+    _mace_model,
     _output_directory,
     _validated_section,
     collect_run_arguments,
@@ -158,6 +159,13 @@ def test_path_and_configuration_validation_do_not_disclose_contents(tmp_path) ->
     with pytest.raises(ValueError, match="integer"):
         _frame_index("last")
 
+    model = tmp_path / "mace.model"
+    model.touch()
+    assert _mace_model(str(model)) == str(model.resolve())
+    assert _mace_model("medium") == "medium"
+    with pytest.raises(ValueError, match="existing file"):
+        _mace_model(str(tmp_path / "missing.model"))
+
 
 def test_generated_configuration_is_built_from_dialogue_and_written_afterward(
     tmp_path,
@@ -166,7 +174,6 @@ def test_generated_configuration_is_built_from_dialogue_and_written_afterward(
     structure.touch()
     config = tmp_path / "generated.yaml"
     output = tmp_path / "run"
-    secret = "not-printed-secret"
     stream = StringIO()
     result = collect_run_arguments(
         structure=None,
@@ -178,8 +185,7 @@ def test_generated_configuration_is_built_from_dialogue_and_written_afterward(
         input_fn=_answers(
             str(structure),
             str(config),
-            "tests.helpers:make_zero_calculator",
-            f'{{"api_key": "{secret}"}}',
+            "medium",
             '{"max_steps": 12}',
             "{}",
             "{}",
@@ -202,13 +208,18 @@ def test_generated_configuration_is_built_from_dialogue_and_written_afterward(
     assert result.generated_config.relaxation.max_steps == 12
     assert result.generated_config.phonopy.mesh_length == 100.0
     assert not config.exists()
-    assert secret not in stream.getvalue()
+    assert "MACE model name or path" in stream.getvalue()
 
     write_generated_configuration(config, result.generated_config)
     loaded = load_run_config(config)
     assert loaded.calculator is not None
-    assert loaded.calculator.factory == "tests.helpers:make_zero_calculator"
-    assert loaded.calculator.kwargs == {"api_key": secret}
+    assert loaded.calculator.factory == "phonokiller.calculators:make_mace_calculator"
+    assert loaded.calculator.kwargs == {
+        "model": "medium",
+        "device": "cuda",
+        "default_dtype": "float32",
+        "dispersion": False,
+    }
     assert loaded.relaxation.max_steps == 12
     with pytest.raises(FileExistsError):
         write_generated_configuration(config, result.generated_config)
@@ -264,8 +275,7 @@ def test_generated_configuration_refusal_creates_no_files(tmp_path) -> None:
         input_fn=_answers(
             str(structure),
             str(config),
-            "tests.helpers:make_zero_calculator",
-            "{}",
+            "medium",
             "{}",
             "{}",
             "{}",
@@ -396,8 +406,7 @@ def test_guided_main_generates_yaml_only_after_confirmation(
         (
             str(structure),
             str(config),
-            "tests.helpers:make_zero_calculator",
-            "{}",
+            "medium",
             "{}",
             "{}",
             "{}",

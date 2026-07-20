@@ -11,6 +11,13 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
+DEFAULT_MACE_FACTORY = "phonokiller.calculators:make_mace_calculator"
+DEFAULT_MACE_MODEL = "medium"
+DEFAULT_MACE_DEVICE = "cuda"
+DEFAULT_MACE_DTYPE = "float32"
+DEFAULT_MACE_DISPERSION = False
+
+
 class RelaxationMode(str, Enum):
     POSITIONS = "positions"
     FULL_CELL = "full_cell"
@@ -99,6 +106,18 @@ class CalculatorConfig(StrictModel):
         return value
 
 
+def _default_mace_calculator_config() -> CalculatorConfig:
+    return CalculatorConfig(
+        factory=DEFAULT_MACE_FACTORY,
+        kwargs={
+            "model": DEFAULT_MACE_MODEL,
+            "device": DEFAULT_MACE_DEVICE,
+            "default_dtype": DEFAULT_MACE_DTYPE,
+            "dispersion": DEFAULT_MACE_DISPERSION,
+        },
+    )
+
+
 class SymmetryReductionConfig(StrictModel):
     symprec: float = Field(default=0.15, gt=0)
     angle_tolerance: float = Field(default=-1.0, ge=-1.0)
@@ -122,7 +141,9 @@ class RunConfig(StrictModel):
     search: SearchConfig = Field(default_factory=SearchConfig)
     symmetry: SymmetryReductionConfig = Field(default_factory=SymmetryReductionConfig)
     deduplication: DeduplicationConfig = Field(default_factory=DeduplicationConfig)
-    calculator: CalculatorConfig | None = None
+    calculator: CalculatorConfig = Field(
+        default_factory=_default_mace_calculator_config
+    )
 
     def effective_candidate_relaxation(self) -> RelaxationConfig:
         return self.candidate_relaxation.resolve(self.relaxation)

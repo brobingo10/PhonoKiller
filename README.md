@@ -10,10 +10,11 @@ repeats the phonon calculation on the best structure.
 
 Run PhonoKiller without arguments in an interactive terminal to open Mori's
 guided CLI. The guide explains and validates every `run` argument, asks for the
-calculator factory and optional JSON overrides for each workflow-settings
-section, and builds the YAML configuration for you. No prepared YAML file is
-required. Mori does not write that generated configuration, create workflow
-files, or load the calculator until the run is confirmed.
+MACE model name or local checkpoint path, and asks for optional JSON overrides
+for each workflow-settings section. It then builds the YAML configuration for
+you. No prepared YAML file is required. Mori does not write that generated
+configuration, create workflow files, or load the calculator until the run is
+confirmed.
 
 ```console
 phonokiller
@@ -35,17 +36,23 @@ The optional CLI values are `--format` for an explicit ASE input format,
 received through non-interactive input fail with exit code `2` instead of
 waiting for answers.
 
-The calculator is supplied as an importable factory. The same provider is used
-for the initial relaxation, displaced-supercell forces, and candidate
-relaxations. In guided mode, enter this value when Mori asks for the calculator
-factory. Each following settings prompt accepts a JSON object such as
+MACE is the default calculator. Its default is the MACE-MP `medium` model on
+`cuda` with `float32` precision and no added dispersion correction. Install a
+CUDA-compatible PyTorch build first, then install MACE with
+`pip install mace-torch` (or, from a source checkout, `pip install -e ".[mace]"`).
+Mori accepts a MACE-MP model name or an existing local `.model` checkpoint path.
+Each following settings prompt accepts a JSON object such as
 `{"max_steps": 800}` or `{}` to retain the stated PhonoKiller defaults. The
 equivalent hand-written configuration for a non-interactive run is:
 
 ```yaml
 calculator:
-  factory: my_calculators:make_calculator
-  kwargs: {}
+  factory: phonokiller.calculators:make_mace_calculator
+  kwargs:
+    model: medium  # Or /absolute/path/to/fine_tuned.model
+    device: cuda
+    default_dtype: float32
+    dispersion: false
 
 relaxation:
   mode: full_cell
@@ -90,11 +97,13 @@ Rerunning the same command resumes matching checkpoints. A changed structure,
 configuration, calculator identity, or dependency version is rejected instead
 of being mixed with existing results.
 
-The Python entry point is:
+The Python API continues to accept any ASE calculator factory. To use the
+built-in MACE factory directly:
 
 ```python
 from phonokiller import RunConfig, run_workflow
+from phonokiller.calculators import make_mace_calculator
 
-result = run_workflow(atoms, calculator_factory, RunConfig(), "search-run")
+result = run_workflow(atoms, make_mace_calculator, RunConfig(), "search-run")
 print(result.status, result.artifacts.history)
 ```
