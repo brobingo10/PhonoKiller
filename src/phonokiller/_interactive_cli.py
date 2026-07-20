@@ -4,32 +4,74 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
 import shutil
 import textwrap
 from typing import TextIO, TypeVar
+from uuid import uuid4
 
-from .config import load_run_config
+import yaml
+
+from .config import RunConfig, load_run_config
 
 
 _MORI_PORTRAIT = (
-    "      __..----..__       //",
-    "  _.-'  _..--.._  `-._ // ",
-    " /    .'  /\\ /\\  `.   V/  ",
-    "|    /   (o   o)   \\  /|  ",
-    "|   |       ^       |// |  ",
-    " \\  |    `---'     // /   ",
-    "  `._\\   .-=-.    //.'    ",
-    "     /`--|___|--'//\\      ",
-    "    /___/|   |\\_//__\\     ",
-    "      _/ |___| //\\_       ",
-    "     /___/   \\//___\\      ",
-    "             //)           ",
+    "           \u2840\u2804\u2802\u280a\u2808                \u2809\u2810\u2802\u2824\u2840\u2840",
+    "       \u2840\u2804\u2802\u2801       \u2880\u28c0\u28e0\u2864\u2864\u2824\u2824\u2824\u2804\u28c4\u2840        \u2808\u2812\u2804\u2840",
+    "    \u2880\u2814\u2808      \u2840\u28e0\u2874\u283e\u281f\u281f\u280d\u2804\u2840      \u2808\u2819\u2832\u28a4\u28c0       \u2808\u2811\u2884\u2840",
+    "  \u2840\u2806\u2801     \u28c0\u2874\u281a\u280b\u2805\u2802      \u2802         \u2839\u28f7\u28c4        \u2808\u2822\u2840",
+    "\u28a0\u2818      \u28e0\u2812\u2809  \u2802           \u2884      \u2884\u28ff\u28ff\u28f7\u2844        \u2808\u2822\u2840",
+    "\u2801     \u2880\u285e\u2801             \u2880 \u2880\u2874\u2863\u2850\u28a4\u2864\u28a6\u281e\u283f\u283b\u2805\u2818\u28bf\u28c6         \u2808",
+    "     \u28f0\u28ff\u2880             \u28c4\u2806\u2811\u2829\u2808 \u2808 \u2802       \u28bb\u28c6",
+    "    \u28f8\u28ff\u287f\u2878\u28e7\u2812\u2827\u2814\u2808\u281a\u2810 \u2808\u2804\u2812\u2818\u280a                 \u28bb\u2846",
+    "   \u28b0\u2807\u2811\u2801     \u2890\u2804                        \u2808\u28bf\u2844",
+    "   \u284f         \u28f7\u2840  \u2890\u2840                    \u2818\u28f7",
+    "   \u2887     \u2828\u2884  \u2838\u28ff\u28e6\u2840 \u2818\u2886\u28c4\u28d1\u28c0\u2840      \u28e0\u2864\u2844       \u283a\u28c7",
+    "   \u2811\u2844   \u2880\u2880\u28d8\u28f6\u28f4\u28e2\u28e4\u2874\u287e\u28ff\u28ff\u28ff\u28ff\u28ff\u28ff\u28f7    \u2880\u287c\u28b5\u28ff\u28be\u2840       \u28bb\u2840",
+    "    \u2822\u2840\u2804\u2840 \u2836\u28dd\u28bf\u28ff\u28ff\u28ff\u28c2\u2840\u2860\u28f6\u28f4\u28fe\u28ff\u28ff\u28ff\u2842   \u28b8\u28df\u28f2\u28bd\u28ff\u2801       \u2818\u28c7",
+    "        \u2821 \u2880\u283c\u28ff\u28ff\u28ff\u28ff\u28ff\u28fe\u28ff\u28ff\u28ff\u28ff\u28ff\u28ff\u284e   \u2810\u28e7\u28fe\u287f\u2803   \u2820     \u2818\u2844",
+    "        \u2808\u2804\u2810\u28ff\u28ff\u28ff\u28ff\u28ff\u28ff\u28ff\u28ff\u28ff\u28ff\u28ff\u28ff\u28ff\u2847   \u2808\u281b\u280b      \u2882     \u2831\u2844",
+    "         \u2847\u2808\u28bf\u28ff\u28ff\u28ff\u28ff\u28ff\u28ff\u28ff\u28ff\u28ff\u28ff\u28ff\u28ff\u2847    \u2840        \u2823    \u2884\u28ff\u2880",
+    "        \u2820\u2841 \u2818\u28ff\u28ff\u28ff\u28ff\u28ff\u28ff\u28ff\u28ff\u28ff\u28ff\u28ff\u28ff\u2842   \u2890          \u2801\u2822\u2844\u2890\u281c\u28af\u28b1",
+    "        \u2810   \u2808\u28b6\u28fe\u28fe\u28ff\u28ff\u28ff\u28ff\u28ff\u28ff\u28ff\u28ff    \u28e8\u2802           \u2891  \u2808\u2842\u28c7",
+    "        \u28a8     \u283b\u28ff\u28ff\u28ff\u28ff\u28ff\u287f\u289f\u28ff\u28ff    \u28fe             \u2840  \u2806\u28f9",
+    "        \u28fc      \u2819\u283b\u281b\u2809\u2801 \u28bb\u28ff\u28ff\u2804   \u2813                \u2883\u280e",
+    "    \u2828\u2884\u28c0\u2834\u2801 \u2880\u2802         \u2808\u2801           \u2820         \u2870\u2811",
+    "    \u2808\u2821\u2804\u2840 \u2804\u285e\u2860                           \u2840\u2880\u2820\u280a\u281c\u2801",
+    "      \u2820\u28a0\u2860\u283e\u280b  \u2840                       \u28c6\u2808 \u2802 \u2808",
+    "          \u2810\u2810\u2888 \u2814\u2808\u2820\u2820\u2820                  \u283c\u28c4\u2840",
 )
-_MORI_COLORS = (201, 200, 199, 198, 197, 196, 202, 208, 209, 214, 215, 216)
+
+_MORI_COLORS = (
+    201,
+    200,
+    199,
+    198,
+    197,
+    196,
+    196,
+    202,
+    202,
+    208,
+    208,
+    214,
+    214,
+    208,
+    208,
+    202,
+    202,
+    196,
+    197,
+    198,
+    199,
+    200,
+    201,
+    201,
+)
 _PORTRAIT_WIDTH = max(len(line) for line in _MORI_PORTRAIT)
-_SIDE_BY_SIDE_MINIMUM = _PORTRAIT_WIDTH + 38
+_SIDE_BY_SIDE_MINIMUM = _PORTRAIT_WIDTH + 52
 _T = TypeVar("_T")
 
 
@@ -47,6 +89,7 @@ class GuidedRunArguments:
     format: str | None
     index: int
     no_resume: bool
+    generated_config: RunConfig | None = None
 
 
 def interactive_terminal_available(stream: TextIO) -> bool:
@@ -127,12 +170,8 @@ def collect_run_arguments(
             width,
             use_color,
         )
-        selected_config = _ask_value(
-            "The configuration argument identifies the YAML file containing the "
-            "calculator factory and all relaxation, Phonopy, and search settings.",
-            "Enter the configuration file",
-            _display_path(config),
-            _configuration_file,
+        selected_config, generated_config = _collect_configuration(
+            config,
             input_fn,
             stream,
             width,
@@ -191,10 +230,9 @@ def collect_run_arguments(
             format=selected_format,
             index=selected_index,
             no_resume=not resume,
+            generated_config=generated_config,
         )
-        render_turn(
-            _summary(resolved), stream, width=width, use_color=use_color
-        )
+        render_turn(_summary(resolved), stream, width=width, use_color=use_color)
         confirmed = _ask_confirmation(input_fn, stream, width, use_color)
     except (EOFError, KeyboardInterrupt) as exc:
         raise InteractiveCancelled from exc
@@ -207,6 +245,96 @@ def collect_run_arguments(
         )
         return None
     return resolved
+
+
+def write_generated_configuration(path: Path, config: RunConfig) -> None:
+    """Atomically write a configuration assembled by the guided conversation."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        with temporary.open("x", encoding="utf-8") as stream:
+            yaml.safe_dump(config.model_dump(mode="json"), stream, sort_keys=False)
+        os.link(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _collect_configuration(
+    initial: Path | None,
+    input_fn: Callable[[], str],
+    stream: TextIO,
+    width: int,
+    use_color: bool,
+) -> tuple[Path, RunConfig | None]:
+    if initial is not None and initial.is_file():
+        selected = _ask_value(
+            "The configuration argument identifies an existing PhonoKiller YAML "
+            "file. It defines the calculator factory and all workflow settings.",
+            "Enter the existing configuration file",
+            str(initial),
+            _configuration_file,
+            input_fn,
+            stream,
+            width,
+            use_color,
+        )
+        return selected, None
+
+    destination = _ask_value(
+        "Mori will generate the configuration from this conversation. The "
+        "configuration destination must be a new YAML file and is written only "
+        "after the final launch confirmation.",
+        "Enter the new configuration file",
+        str(initial) if initial is not None else str(_available_config_destination()),
+        _configuration_destination,
+        input_fn,
+        stream,
+        width,
+        use_color,
+    )
+    generated = _build_configuration(input_fn, stream, width, use_color)
+    return destination, generated
+
+
+def _build_configuration(
+    input_fn: Callable[[], str], stream: TextIO, width: int, use_color: bool
+) -> RunConfig:
+    factory = _ask_value(
+        "The calculator factory is an importable 'module:function' that returns "
+        "an ASE Calculator for each workflow calculation context.",
+        "Enter the calculator factory",
+        None,
+        _calculator_factory,
+        input_fn,
+        stream,
+        width,
+        use_color,
+    )
+    kwargs = _ask_value(
+        "Calculator keyword arguments are passed to the factory. Enter a JSON "
+        "object; use {} when the factory needs no keyword arguments.",
+        "Enter calculator keyword arguments as JSON",
+        "{}",
+        _json_mapping,
+        input_fn,
+        stream,
+        width,
+        use_color,
+    )
+    payload: dict[str, object] = {"calculator": {"factory": factory, "kwargs": kwargs}}
+    for section, explanation in _configuration_sections():
+        payload[section] = _ask_value(
+            explanation,
+            f"Enter {section} overrides as JSON",
+            "{}",
+            _validated_section(section),
+            input_fn,
+            stream,
+            width,
+            use_color,
+        )
+    return RunConfig.model_validate(payload)
 
 
 def _ask_value(
@@ -337,6 +465,120 @@ def _configuration_file(value: str) -> Path:
     return path
 
 
+def _available_config_destination() -> Path:
+    preferred = Path("phonokiller.yaml")
+    if not preferred.exists():
+        return preferred
+    generated = Path("phonokiller.generated.yaml")
+    if not generated.exists():
+        return generated
+    counter = 2
+    while True:
+        numbered = Path(f"phonokiller.generated-{counter}.yaml")
+        if not numbered.exists():
+            return numbered
+        counter += 1
+
+
+def _configuration_destination(value: str) -> Path:
+    path = _clean_path(value)
+    if path.suffix.lower() not in {".yaml", ".yml"}:
+        raise ValueError("the configuration destination must end in .yaml or .yml")
+    if path.exists():
+        raise ValueError("the configuration destination must not already exist")
+    if path.parent.exists() and not path.parent.is_dir():
+        raise ValueError("the configuration parent path is not a directory")
+    return path
+
+
+def _calculator_factory(value: str) -> str:
+    selected = value.strip()
+    try:
+        RunConfig.model_validate({"calculator": {"factory": selected, "kwargs": {}}})
+    except Exception as exc:
+        raise ValueError("use the importable module:function syntax") from exc
+    return selected
+
+
+def _json_mapping(value: str) -> dict[str, object]:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            "enter a JSON object with double-quoted keys, or {} for defaults"
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("the value must be a JSON object")
+    return parsed
+
+
+def _configuration_sections() -> tuple[tuple[str, str], ...]:
+    return (
+        (
+            "relaxation",
+            "Base relaxation settings control the ASE optimizer. The defaults are "
+            "positions-only BFGS relaxation, 0.005 eV/angstrom force tolerance, "
+            "and 500 steps. JSON keys are mode, optimizer, force_tolerance, and "
+            "max_steps; use {} to keep all defaults.",
+        ),
+        (
+            "candidate_relaxation",
+            "Candidate relaxation overrides inherit every omitted base relaxation "
+            "value. JSON keys are mode, optimizer, force_tolerance, and max_steps; "
+            "use {} for complete inheritance.",
+        ),
+        (
+            "phonopy",
+            "Phonopy sizing defaults request a 10 angstrom minimum finite-displacement "
+            "supercell span and a scalar mesh length of 100. JSON keys are "
+            "minimum_supercell_span_angstrom and mesh_length; use {} for defaults.",
+        ),
+        (
+            "soft_modes",
+            "Soft-mode settings default to a -0.05 THz stability threshold, 0.001 "
+            "THz degeneracy tolerance, five groups, 0.1 angstrom mean displacement, "
+            "zero-degree phase, and 1e-8 q-point tolerance. Use {} for defaults.",
+        ),
+        (
+            "search",
+            "Search limits default to ten Phonopy evaluations and 256 candidates per "
+            "iteration. JSON keys are max_evaluations and "
+            "max_candidates_per_iteration; use {} for defaults.",
+        ),
+        (
+            "symmetry",
+            "Primitive reduction defaults use symprec 0.15 and automatic angle "
+            "tolerance -1. JSON keys are symprec and angle_tolerance; use {} for "
+            "defaults.",
+        ),
+        (
+            "deduplication",
+            "Deduplication compares sites, cell lengths, angles, and primitive "
+            "volumes. The defaults are 0.15 angstrom, 0.01 relative length, 1 "
+            "degree, 0.1 cubic angstrom, and no volume scaling. Use {} for defaults.",
+        ),
+    )
+
+
+def _validated_section(section: str) -> Callable[[str], dict[str, object]]:
+    def parse(value: str) -> dict[str, object]:
+        selected = _json_mapping(value)
+        try:
+            RunConfig.model_validate({section: selected})
+        except Exception as exc:
+            errors = getattr(exc, "errors", None)
+            if callable(errors):
+                first = errors(include_url=False, include_input=False)[0]
+                location = ".".join(str(part) for part in first["loc"])
+                raise ValueError(f"{location}: {first['msg']}") from exc
+            raise ValueError(
+                f"the {section} section failed validation ({type(exc).__name__})"
+            ) from exc
+        return selected
+
+    return parse
+
+
 def _output_directory(value: str) -> Path:
     path = _clean_path(value)
     if path.exists() and not path.is_dir():
@@ -374,11 +616,14 @@ def _display_path(path: Path | None) -> str | None:
 
 
 def _summary(arguments: GuidedRunArguments) -> str:
+    configuration = str(arguments.config)
+    if arguments.generated_config is not None:
+        configuration += " (generated after confirmation)"
     return "\n".join(
         (
             "Resolved run arguments:",
             f"Structure: {arguments.structure}",
-            f"Configuration: {arguments.config}",
+            f"Configuration: {configuration}",
             f"Output: {arguments.output}",
             f"ASE format: {arguments.format or 'automatic detection'}",
             f"Frame index: {arguments.index}",

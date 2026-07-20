@@ -8,14 +8,21 @@ from types import SimpleNamespace
 import pytest
 
 import phonokiller.cli as cli
+from phonokiller.config import load_run_config
 from phonokiller._interactive_cli import (
+    _MORI_PORTRAIT,
+    _PORTRAIT_WIDTH,
     _clean_path,
+    _configuration_destination,
     _configuration_file,
     _frame_index,
+    _json_mapping,
     _output_directory,
+    _validated_section,
     collect_run_arguments,
     color_enabled,
     render_turn,
+    write_generated_configuration,
 )
 
 
@@ -39,29 +46,23 @@ def _answers(*values: str):
 
 def test_plain_wide_portrait_snapshot() -> None:
     stream = StringIO()
-    render_turn("Status message.", stream, width=80, use_color=False)
-    assert stream.getvalue() == (
-        "\n"
-        "      __..----..__       //   MORI> Status message.\n"
-        "  _.-'  _..--.._  `-._ //\n"
-        " /    .'  /\\ /\\  `.   V/\n"
-        "|    /   (o   o)   \\  /|\n"
-        "|   |       ^       |// |\n"
-        " \\  |    `---'     // /\n"
-        "  `._\\   .-=-.    //.'\n"
-        "     /`--|___|--'//\\\n"
-        "    /___/|   |\\_//__\\\n"
-        "      _/ |___| //\\_\n"
-        "     /___/   \\//___\\\n"
-        "             //)\n"
+    render_turn("Status message.", stream, width=120, use_color=False)
+    lines = stream.getvalue().splitlines()
+    assert len(_MORI_PORTRAIT) == 24
+    assert _PORTRAIT_WIDTH == 48
+    assert len(lines) == 25
+    assert lines[1] == (
+        f"{_MORI_PORTRAIT[0].ljust(_PORTRAIT_WIDTH)}   MORI> Status message."
     )
+    assert lines[2] == _MORI_PORTRAIT[1].rstrip()
+    assert lines[-1] == _MORI_PORTRAIT[-1].rstrip()
 
 
 def test_colored_portrait_and_no_color_fallback() -> None:
     plain = StringIO()
     colored = StringIO()
-    render_turn("Status message.", plain, width=80, use_color=False)
-    render_turn("Status message.", colored, width=80, use_color=True)
+    render_turn("Status message.", plain, width=120, use_color=False)
+    render_turn("Status message.", colored, width=120, use_color=True)
     assert "\x1b[38;5;201m" in colored.getvalue()
     assert re.sub(r"\x1b\[[0-9;]*m", "", colored.getvalue()) == plain.getvalue()
     assert color_enabled(TtyStringIO(), {})
@@ -70,11 +71,11 @@ def test_colored_portrait_and_no_color_fallback() -> None:
 
 def test_narrow_layout_stacks_portrait_above_dialogue() -> None:
     stream = StringIO()
-    render_turn("Narrow status.", stream, width=40, use_color=False)
+    render_turn("Narrow status.", stream, width=80, use_color=False)
     lines = stream.getvalue().splitlines()
-    assert lines[1] == "      __..----..__       //"
-    assert lines[13] == ""
-    assert lines[14] == "MORI> Narrow status."
+    assert lines[1] == _MORI_PORTRAIT[0].rstrip()
+    assert lines[25] == ""
+    assert lines[26] == "MORI> Narrow status."
 
 
 def test_guide_reviews_supplied_defaults_and_confirms(tmp_path) -> None:
@@ -158,6 +159,75 @@ def test_path_and_configuration_validation_do_not_disclose_contents(tmp_path) ->
         _frame_index("last")
 
 
+def test_generated_configuration_is_built_from_dialogue_and_written_afterward(
+    tmp_path,
+) -> None:
+    structure = tmp_path / "input.extxyz"
+    structure.touch()
+    config = tmp_path / "generated.yaml"
+    output = tmp_path / "run"
+    secret = "not-printed-secret"
+    stream = StringIO()
+    result = collect_run_arguments(
+        structure=None,
+        config=None,
+        output=None,
+        format=None,
+        index=-1,
+        no_resume=False,
+        input_fn=_answers(
+            str(structure),
+            str(config),
+            "tests.helpers:make_zero_calculator",
+            f'{{"api_key": "{secret}"}}',
+            '{"max_steps": 12}',
+            "{}",
+            "{}",
+            "{}",
+            "{}",
+            "{}",
+            "{}",
+            str(output),
+            "auto",
+            "-1",
+            "yes",
+            "yes",
+        ),
+        stream=stream,
+        width=80,
+        use_color=False,
+    )
+    assert result is not None
+    assert result.generated_config is not None
+    assert result.generated_config.relaxation.max_steps == 12
+    assert result.generated_config.phonopy.mesh_length == 100.0
+    assert not config.exists()
+    assert secret not in stream.getvalue()
+
+    write_generated_configuration(config, result.generated_config)
+    loaded = load_run_config(config)
+    assert loaded.calculator is not None
+    assert loaded.calculator.factory == "tests.helpers:make_zero_calculator"
+    assert loaded.calculator.kwargs == {"api_key": secret}
+    assert loaded.relaxation.max_steps == 12
+    with pytest.raises(FileExistsError):
+        write_generated_configuration(config, result.generated_config)
+
+
+def test_generated_configuration_values_are_validated_without_disclosure(
+    tmp_path,
+) -> None:
+    destination = tmp_path / "generated.yaml"
+    assert _configuration_destination(str(destination)) == destination
+    with pytest.raises(ValueError, match=r"\.yaml"):
+        _configuration_destination(str(tmp_path / "generated.json"))
+    with pytest.raises(ValueError, match="JSON object"):
+        _json_mapping("[]")
+    with pytest.raises(ValueError, match="search.max_evaluations") as error:
+        _validated_section("search")('{"max_evaluations": 0}')
+    assert 'max_evaluations": 0' not in str(error.value)
+
+
 def test_explicit_refusal_creates_no_output(tmp_path) -> None:
     structure = tmp_path / "input.extxyz"
     structure.touch()
@@ -176,6 +246,45 @@ def test_explicit_refusal_creates_no_output(tmp_path) -> None:
         use_color=False,
     )
     assert result is None
+    assert not output.exists()
+
+
+def test_generated_configuration_refusal_creates_no_files(tmp_path) -> None:
+    structure = tmp_path / "input.extxyz"
+    structure.touch()
+    config = tmp_path / "not-created.yaml"
+    output = tmp_path / "not-created-run"
+    result = collect_run_arguments(
+        structure=None,
+        config=None,
+        output=None,
+        format=None,
+        index=-1,
+        no_resume=False,
+        input_fn=_answers(
+            str(structure),
+            str(config),
+            "tests.helpers:make_zero_calculator",
+            "{}",
+            "{}",
+            "{}",
+            "{}",
+            "{}",
+            "{}",
+            "{}",
+            "{}",
+            str(output),
+            "auto",
+            "-1",
+            "yes",
+            "no",
+        ),
+        stream=StringIO(),
+        width=80,
+        use_color=False,
+    )
+    assert result is None
+    assert not config.exists()
     assert not output.exists()
 
 
@@ -237,8 +346,71 @@ def test_guided_main_launches_only_after_confirmation(monkeypatch, tmp_path) -> 
     structure.touch()
     config = _configuration(tmp_path / "config.yaml")
     output = tmp_path / "run"
+    responses = "\n".join((str(structure), "", "", "", "", "", "yes"))
+    monkeypatch.setattr(cli.sys, "stdin", TtyStringIO(responses + "\n"))
+    calls: list[tuple] = []
+
+    def fake_workflow(*args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(
+            status="stable",
+            iterations=(),
+            artifacts=SimpleNamespace(
+                output_dir=output,
+                final_structure=output / "final" / "structure.extxyz",
+            ),
+        )
+
+    monkeypatch.setattr(cli, "run_workflow", fake_workflow)
+    assert cli.main(["run", "--config", str(config), "--output", str(output)]) == 0
+    assert len(calls) == 1
+    assert calls[0][0][0] == structure
+    assert calls[0][0][3] == output
+    assert calls[0][1] == {"resume": True, "format": None, "index": -1}
+
+
+def test_guided_main_refusal_does_not_load_calculator(monkeypatch, tmp_path) -> None:
+    structure = tmp_path / "input.extxyz"
+    structure.touch()
+    config = _configuration(tmp_path / "config.yaml")
+    output = tmp_path / "not-created"
+    responses = "\n".join((str(structure), "", "", "", "", "", "no"))
+    monkeypatch.setattr(cli.sys, "stdin", TtyStringIO(responses + "\n"))
+    monkeypatch.setattr(
+        cli,
+        "_load_calculator_factory",
+        lambda *args: pytest.fail("the calculator must not be loaded"),
+    )
+    assert cli.main(["run", "--config", str(config), "--output", str(output)]) == 0
+    assert not output.exists()
+
+
+def test_guided_main_generates_yaml_only_after_confirmation(
+    monkeypatch, tmp_path
+) -> None:
+    structure = tmp_path / "input.extxyz"
+    structure.touch()
+    config = tmp_path / "mori-generated.yaml"
+    output = tmp_path / "run"
     responses = "\n".join(
-        (str(structure), str(config), str(output), "", "", "", "yes")
+        (
+            str(structure),
+            str(config),
+            "tests.helpers:make_zero_calculator",
+            "{}",
+            "{}",
+            "{}",
+            "{}",
+            "{}",
+            '{"max_evaluations": 3}',
+            "{}",
+            "{}",
+            str(output),
+            "auto",
+            "-1",
+            "yes",
+            "yes",
+        )
     )
     monkeypatch.setattr(cli.sys, "stdin", TtyStringIO(responses + "\n"))
     calls: list[tuple] = []
@@ -255,26 +427,41 @@ def test_guided_main_launches_only_after_confirmation(monkeypatch, tmp_path) -> 
         )
 
     monkeypatch.setattr(cli, "run_workflow", fake_workflow)
-    assert cli.main([]) == 0
+    assert cli.main(["run"]) == 0
     assert len(calls) == 1
-    assert calls[0][0][0] == structure
-    assert calls[0][0][3] == output
-    assert calls[0][1] == {"resume": True, "format": None, "index": -1}
+    assert config.is_file()
+    assert load_run_config(config).search.max_evaluations == 3
 
 
-def test_guided_main_refusal_does_not_load_calculator(monkeypatch, tmp_path) -> None:
+def test_complete_command_remains_prompt_free(monkeypatch, tmp_path, capsys) -> None:
     structure = tmp_path / "input.extxyz"
     structure.touch()
     config = _configuration(tmp_path / "config.yaml")
-    output = tmp_path / "not-created"
-    responses = "\n".join(
-        (str(structure), str(config), str(output), "", "", "", "no")
-    )
-    monkeypatch.setattr(cli.sys, "stdin", TtyStringIO(responses + "\n"))
+    output = tmp_path / "run"
+    monkeypatch.setattr(cli.sys, "stdin", StringIO())
     monkeypatch.setattr(
         cli,
-        "_load_calculator_factory",
-        lambda *args: pytest.fail("the calculator must not be loaded"),
+        "run_workflow",
+        lambda *args, **kwargs: SimpleNamespace(
+            status="stable",
+            iterations=(),
+            artifacts=SimpleNamespace(
+                output_dir=output,
+                final_structure=output / "final" / "structure.extxyz",
+            ),
+        ),
     )
-    assert cli.main(["run"]) == 0
-    assert not output.exists()
+    assert (
+        cli.main(
+            [
+                "run",
+                str(structure),
+                "--config",
+                str(config),
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    assert "MORI>" not in capsys.readouterr().out

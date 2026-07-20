@@ -18,6 +18,7 @@ from ._interactive_cli import (
     color_enabled,
     interactive_terminal_available,
     terminal_width,
+    write_generated_configuration,
 )
 from .workflow import run_workflow
 
@@ -29,6 +30,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not raw_arguments and interactive:
         raw_arguments = ["run"]
     args = parser.parse_args(raw_arguments)
+    generated_config = None
     missing = _missing_run_arguments(args)
     if missing:
         if not interactive:
@@ -57,7 +59,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.format = guided.format
         args.index = guided.index
         args.no_resume = guided.no_resume
+        generated_config = guided.generated_config
     try:
+        if generated_config is not None:
+            write_generated_configuration(args.config, generated_config)
+            print(f"MORI> Generated configuration: {args.config}")
         config = load_run_config(args.config)
         if config.calculator is None:
             raise CalculatorValidationError(

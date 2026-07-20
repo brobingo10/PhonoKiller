@@ -9,17 +9,21 @@ repeats the phonon calculation on the best structure.
 ## Run the workflow
 
 Run PhonoKiller without arguments in an interactive terminal to open Mori's
-guided CLI. The guide explains and validates every `run` argument before asking
-for confirmation. It does not create workflow files or load the calculator
-until the run is confirmed.
+guided CLI. The guide explains and validates every `run` argument, asks for the
+calculator factory and optional JSON overrides for each workflow-settings
+section, and builds the YAML configuration for you. No prepared YAML file is
+required. Mori does not write that generated configuration, create workflow
+files, or load the calculator until the run is confirmed.
 
 ```console
 phonokiller
 ```
 
 An incomplete `phonokiller run` command opens the same guide and presents any
-supplied values as editable defaults. Complete commands remain non-interactive,
-which keeps scripts and batch jobs deterministic:
+supplied values as editable defaults. If `--config` already identifies a valid
+YAML file, the guide can reuse it; otherwise Mori asks where to create a new
+one. Complete commands remain non-interactive, which keeps scripts and batch
+jobs deterministic and therefore still requires an existing YAML file:
 
 ```console
 phonokiller run POSCAR --config phonokiller.yaml --output search-run
@@ -33,7 +37,10 @@ waiting for answers.
 
 The calculator is supplied as an importable factory. The same provider is used
 for the initial relaxation, displaced-supercell forces, and candidate
-relaxations.
+relaxations. In guided mode, enter this value when Mori asks for the calculator
+factory. Each following settings prompt accepts a JSON object such as
+`{"max_steps": 800}` or `{}` to retain the stated PhonoKiller defaults. The
+equivalent hand-written configuration for a non-interactive run is:
 
 ```yaml
 calculator:
