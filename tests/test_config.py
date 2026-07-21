@@ -70,7 +70,6 @@ def test_candidate_overrides_layer_on_base() -> None:
         {"search": {"max_evaluations": 0}},
         {"search": {"max_candidates_per_iteration": 0}},
         {"search": {"max_candidate_atoms": 0}},
-        {"search": {"max_candidate_atoms": 3501}},
         {"search": {"max_dense_hessian_memory_mib": 0}},
         {"candidate_relaxation": {"max_steps": 0}},
         {"soft_modes": {"max_mode_groups": 0}},
@@ -79,6 +78,11 @@ def test_candidate_overrides_layer_on_base() -> None:
 def test_invalid_unified_config_is_rejected(payload) -> None:
     with pytest.raises(ValidationError):
         RunConfig.model_validate(payload)
+
+
+def test_candidate_atom_limit_can_be_overridden_above_default() -> None:
+    config = RunConfig.model_validate({"search": {"max_candidate_atoms": 5000}})
+    assert config.search.max_candidate_atoms == 5000
 
 
 def test_removed_stage_sections_are_rejected() -> None:

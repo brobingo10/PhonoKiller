@@ -98,7 +98,7 @@ class SoftModeConfig(StrictModel):
 class SearchConfig(StrictModel):
     max_evaluations: int = Field(default=10, gt=0)
     max_candidates_per_iteration: int = Field(default=256, gt=0)
-    max_candidate_atoms: int = Field(default=3500, gt=0, le=3500)
+    max_candidate_atoms: int = Field(default=3500, gt=0)
     max_dense_hessian_memory_mib: float = Field(default=256.0, gt=0)
 
 

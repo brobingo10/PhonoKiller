@@ -103,10 +103,10 @@ length is passed directly to Phonopy with eigenvectors enabled.
 Before any distortion structure is written, PhonoKiller records
 `instabilities/preflight.json`. It contains the q-commensurate atom count,
 candidate count, total candidate atoms, maximum atom-steps, and estimated ASE
-optimizer state. Generation is refused if a candidate exceeds 3500 atoms, if
-the candidate count exceeds 256, or if an explicitly selected BFGS optimizer
-would exceed the dense-Hessian memory limit. Calculator/model memory is not
-included in the optimizer estimate.
+optimizer state. Generation is refused if a candidate exceeds the configured
+`max_candidate_atoms` value (3500 by default), if the candidate count exceeds
+256, or if an explicitly selected BFGS optimizer would exceed the dense-Hessian
+memory limit. Calculator/model memory is not included in the optimizer estimate.
 
 ## Outputs and resume
 

@@ -547,8 +547,9 @@ def _configuration_sections() -> tuple[tuple[str, str], ...]:
         (
             "search",
             "Search limits default to ten Phonopy evaluations and 256 candidates per "
-            "iteration, at most 3500 atoms per candidate, and a 256 MiB dense-BFGS "
-            "Hessian limit. JSON keys are max_evaluations, "
+            "iteration, a configurable 3500-atom candidate limit, and a 256 MiB "
+            "dense-BFGS Hessian limit. Any positive integer may be used for the "
+            "candidate atom limit. JSON keys are max_evaluations, "
             "max_candidates_per_iteration, max_candidate_atoms, and "
             "max_dense_hessian_memory_mib; use {} for defaults.",
         ),
