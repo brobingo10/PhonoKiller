@@ -84,7 +84,7 @@ phonopy:
 soft_modes:
   frequency_threshold_thz: -0.05
   degeneracy_tolerance_thz: 0.001
-  max_mode_groups: 1  # One strongest q-space basin per iteration
+  max_mode_groups: 5  # Sequential fallback depth within one Phonopy evaluation
   mean_displacement_angstrom: 0.1
 
 search:
@@ -115,6 +115,22 @@ structure, Phonopy files, soft-mode report, candidate relaxations, reduction,
 and selection record. `history.json` records the complete search path. A
 self-contained `final/` directory is created only after no mode lies below the
 stability threshold.
+
+After candidate deduplication, representatives equivalent to the current
+iteration's accepted primitive are excluded from `unique/`, ranking, and
+selection using the configured structural tolerances. Their completed
+relaxation artifacts remain under `items/` for provenance. A group that yields
+no novel structure falls through to the next frequency-ranked degeneracy group
+without repeating Phonopy, up to `soft_modes.max_mode_groups`. Structures that
+match any earlier accepted primitive are excluded as well. If all permitted
+groups are exhausted, the workflow terminates as `cycle_detected`; if every
+candidate relaxation failed, it reports a runtime failure instead.
+
+Per-rank distortion checkpoints are stored under `instabilities/groups/`, and
+their isolated relaxation and reduction artifacts are stored under
+`candidates/groups/`. The 256-candidate iteration limit is cumulative across
+the groups actually attempted, and no group's exhaustive candidate set is
+truncated to fit the remaining budget.
 
 Rerunning the same command resumes matching checkpoints. A changed structure,
 configuration, calculator identity, or dependency version is rejected instead

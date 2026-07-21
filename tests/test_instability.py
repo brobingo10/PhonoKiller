@@ -153,7 +153,7 @@ def test_generate_exhaustive_candidates_with_exact_mean(tmp_path) -> None:
     assert report["counts"]["generated_candidates"] == 26
     preflight = json.loads(result.preflight_path.read_text(encoding="utf-8"))
     assert preflight["status"] == "accepted"
-    assert preflight["selection_policy"] == "strongest_q_space_basin"
+    assert preflight["selection_policy"] == "sequential_ranked_group_fallback"
     assert preflight["groups"][0]["atoms_per_candidate"] == 1
     assert preflight["totals"]["candidate_count"] == 26
     assert preflight["totals"]["candidate_atoms"] == 26
@@ -218,9 +218,7 @@ def test_only_strongest_q_space_basin_is_generated(tmp_path) -> None:
     mesh = MeshData(
         qpoints=np.asarray([[0.0, 0.0, 0.0], [0.5, 0.0, 0.0]]),
         weights=np.ones(2, dtype=int),
-        frequencies=np.asarray(
-            [original.frequencies[0], original.frequencies[0] + 0.1]
-        ),
+        frequencies=np.asarray([original.frequencies[0], original.frequencies[0]]),
         eigenvectors=np.repeat(original.eigenvectors, 2, axis=0),
         mesh_numbers=np.asarray([2, 1, 1]),
         mesh_length=100.0,
@@ -235,6 +233,47 @@ def test_only_strongest_q_space_basin_is_generated(tmp_path) -> None:
     assert len(result.soft_mode_groups) == 2
     assert [group.rank for group in result.selected_mode_groups] == [1]
     assert len(result.supercells) == 1
+
+
+def test_explicit_second_rank_is_generated_with_cumulative_budget(tmp_path) -> None:
+    phonon, original = make_unstable_phonon()
+    mesh = MeshData(
+        qpoints=np.asarray([[0.0, 0.0, 0.0], [0.5, 0.0, 0.0]]),
+        weights=np.ones(2, dtype=int),
+        frequencies=np.asarray([original.frequencies[0], original.frequencies[0]]),
+        eigenvectors=np.repeat(original.eigenvectors, 2, axis=0),
+        mesh_numbers=np.asarray([2, 1, 1]),
+        mesh_length=100.0,
+    )
+    result = generate_soft_mode_candidates(
+        phonon,
+        mesh,
+        SoftModeConfig(),
+        tmp_path / "rank-two",
+        max_candidates=60,
+        selected_group_rank=2,
+        candidates_already_generated=26,
+    )
+    assert [group.rank for group in result.selected_mode_groups] == [2]
+    assert all(candidate.group_rank == 2 for candidate in result.candidates)
+    preflight = json.loads(result.preflight_path.read_text(encoding="utf-8"))
+    assert preflight["totals"]["candidates_already_generated"] == 26
+    assert preflight["totals"]["cumulative_candidate_count"] == 52
+
+
+def test_cumulative_candidate_cap_refuses_whole_fallback_group(tmp_path) -> None:
+    phonon, mesh = make_unstable_phonon()
+    output = tmp_path / "cumulative-cap"
+    with pytest.raises(CandidateLimitError, match="after 240 already generated"):
+        generate_soft_mode_candidates(
+            phonon,
+            mesh,
+            SoftModeConfig(),
+            output,
+            max_candidates=256,
+            candidates_already_generated=240,
+        )
+    assert sorted(path.name for path in output.iterdir()) == ["preflight.json"]
 
 
 def test_atom_cap_refuses_before_modulation_or_structure_writes(

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal, Protocol, TYPE_CHECKING, runtime_checkable
 
@@ -174,6 +174,11 @@ class CandidateResult:
     spacegroup_symbol: str | None = None
     duplicate_group: int | None = None
     is_representative: bool = False
+    exclusion_reason: Literal[
+        "equivalent_to_loop_input", "equivalent_to_previous_iteration"
+    ] | None = None
+    exclusion_iteration_index: int | None = None
+    exclusion_reference_structure: str | None = None
     error: dict[str, str] | None = None
 
 
@@ -185,6 +190,19 @@ class DuplicateGroup:
     structure_path: Path
 
 
+@dataclass(frozen=True, slots=True)
+class ExcludedDuplicateGroup:
+    index: int
+    representative_index: int
+    member_indices: tuple[int, ...]
+    candidate_ids: tuple[str, ...]
+    reason: Literal[
+        "equivalent_to_loop_input", "equivalent_to_previous_iteration"
+    ]
+    matched_iteration_index: int | None = None
+    reference_structure: Path | None = None
+
+
 @dataclass(slots=True)
 class CandidateReductionResult:
     status: Literal["complete", "partial"]
@@ -192,3 +210,4 @@ class CandidateReductionResult:
     duplicate_groups: list[DuplicateGroup]
     unique_structures: list[Atoms]
     artifacts: CandidateReductionArtifactPaths
+    excluded_groups: list[ExcludedDuplicateGroup] = field(default_factory=list)

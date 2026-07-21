@@ -25,7 +25,6 @@ import yaml
 from .candidates import (
     make_nonideal_primitive,
     reduce_candidates,
-    structures_equivalent,
 )
 from .config import RunConfig
 from .exceptions import (
@@ -262,91 +261,386 @@ def run_workflow(
             _atomic_json(artifacts.manifest, manifest)
             _report(
                 progress,
-                f"Evaluation {iteration_index + 1}: generating distortions from "
-                "ranked unstable modes.",
+                f"Evaluation {iteration_index + 1}: trying up to "
+                f"{min(len(groups), run_config.soft_modes.max_mode_groups)} "
+                "ranked unstable mode group(s) sequentially.",
             )
-            soft_result = generate_soft_mode_candidates(
-                phonon,
+            _write_mode_search_report(
+                paths,
+                run_config,
+                groups,
                 mesh,
-                run_config.soft_modes,
-                paths.instabilities_dir,
-                max_candidates=run_config.search.max_candidates_per_iteration,
-                candidate_relaxation=(
-                    run_config.effective_candidate_relaxation()
-                ),
-                max_candidate_atoms=run_config.search.max_candidate_atoms,
-                max_dense_hessian_memory_mib=(
-                    run_config.search.max_dense_hessian_memory_mib
-                ),
-                source_fingerprint=manifest["fingerprint"],
+                attempts=[],
+                status="searching",
             )
-            preflight_payload = None
-            if (
-                soft_result.preflight_path is not None
-                and soft_result.preflight_path.exists()
-            ):
-                preflight_payload = _read_json(soft_result.preflight_path)
-                preflight_totals = preflight_payload["totals"]
+            previous_accepted = tuple(
+                (int(item["index"]), Path(item["accepted_primitive"]))
+                for item in history
+            )
+            attempts: list[dict[str, Any]] = []
+            generated_total = 0
+            successful_total = 0
+            failed_total = 0
+            deduplicated_total = 0
+            unique_total = 0
+            excluded_groups_total = 0
+            excluded_candidate_ids: list[str] = []
+            excluded_loop_input_groups = 0
+            excluded_loop_input_candidates = 0
+            excluded_previous_groups = 0
+            excluded_previous_candidates = 0
+            candidate_atoms_total = 0
+            maximum_atom_steps_total = 0
+            peak_optimizer_state_bytes = 0
+            winner = None
+            ranking = []
+            winning_mode_group_rank = None
+
+            groups_to_try = groups[: run_config.soft_modes.max_mode_groups]
+            for attempt_number, group in enumerate(groups_to_try, 1):
+                rank_name = f"rank_{group.rank:04d}"
+                instability_output = (
+                    paths.instabilities_dir / "groups" / rank_name
+                )
+                candidate_output = paths.candidates_dir / "groups" / rank_name
+                manifest["stage"] = (
+                    f"iteration:{iteration_index}:mode_group:{group.rank}:generation"
+                )
+                _atomic_json(artifacts.manifest, manifest)
                 _report(
                     progress,
-                    f"Evaluation {iteration_index + 1}: resource preflight accepted "
-                    f"{int(preflight_totals['candidate_count'])} candidate(s), "
-                    f"{int(preflight_totals['candidate_atoms'])} total candidate "
-                    f"atoms, and at most "
-                    f"{int(preflight_totals['maximum_atom_steps'])} atom-steps.",
+                    f"Evaluation {iteration_index + 1}: mode-group attempt "
+                    f"{attempt_number}/{len(groups_to_try)} uses rank {group.rank} "
+                    f"at q={group.qpoint} ({group.minimum_frequency_thz:.6f} THz).",
                 )
-            _report(
-                progress,
-                f"Evaluation {iteration_index + 1}: generated "
-                f"{len(soft_result.candidates)} candidate distortion(s).",
-            )
+                soft_result = generate_soft_mode_candidates(
+                    phonon,
+                    mesh,
+                    run_config.soft_modes,
+                    instability_output,
+                    max_candidates=run_config.search.max_candidates_per_iteration,
+                    candidate_relaxation=(
+                        run_config.effective_candidate_relaxation()
+                    ),
+                    max_candidate_atoms=run_config.search.max_candidate_atoms,
+                    max_dense_hessian_memory_mib=(
+                        run_config.search.max_dense_hessian_memory_mib
+                    ),
+                    source_fingerprint=manifest["fingerprint"],
+                    selected_group_rank=group.rank,
+                    candidates_already_generated=generated_total,
+                )
+                preflight_payload = (
+                    _read_json(soft_result.preflight_path)
+                    if soft_result.preflight_path is not None
+                    and soft_result.preflight_path.exists()
+                    else None
+                )
+                preflight_totals = (
+                    dict(preflight_payload["totals"])
+                    if preflight_payload is not None
+                    else {}
+                )
+                generated_count = len(soft_result.candidates)
+                generated_total += generated_count
+                candidate_atoms_total += int(
+                    preflight_totals.get("candidate_atoms", 0)
+                )
+                maximum_atom_steps_total += int(
+                    preflight_totals.get("maximum_atom_steps", 0)
+                )
+                peak_optimizer_state_bytes = max(
+                    peak_optimizer_state_bytes,
+                    int(preflight_totals.get("peak_optimizer_state_bytes", 0)),
+                )
+                _report(
+                    progress,
+                    f"Evaluation {iteration_index + 1}: rank {group.rank} "
+                    f"preflight accepted {generated_count} candidate(s); "
+                    f"cumulative candidate use is {generated_total}/"
+                    f"{run_config.search.max_candidates_per_iteration}.",
+                )
 
-            manifest["stage"] = f"iteration:{iteration_index}:candidates"
-            _atomic_json(artifacts.manifest, manifest)
-            reduced = reduce_candidates(
-                soft_result.candidates,
-                calculator,
-                run_config,
-                paths.candidates_dir,
-                iteration_index=iteration_index,
-                resume=resume,
-                progress=progress,
-            )
-            successful = [item for item in reduced.candidates if item.status == "success"]
-            if not successful:
-                raise CandidateReductionError(
-                    f"all {len(reduced.candidates)} candidate relaxations failed"
+                manifest["stage"] = (
+                    f"iteration:{iteration_index}:mode_group:{group.rank}:candidates"
                 )
-            representatives = [
-                reduced.candidates[group.representative_index]
-                for group in reduced.duplicate_groups
-            ]
-            winner = min(
-                representatives,
-                key=lambda item: (
-                    float(item.energy_per_atom_eV),
-                    float(item.max_force_eV_per_A),
-                    item.candidate_id,
+                _atomic_json(artifacts.manifest, manifest)
+                reduced = reduce_candidates(
+                    soft_result.candidates,
+                    calculator,
+                    run_config,
+                    candidate_output,
+                    iteration_index=iteration_index,
+                    loop_input_structure=paths.accepted_primitive,
+                    previous_accepted_structures=previous_accepted,
+                    resume=resume,
+                    progress=progress,
+                )
+                successful = [
+                    item for item in reduced.candidates if item.status == "success"
+                ]
+                representatives = [
+                    reduced.candidates[item.representative_index]
+                    for item in reduced.duplicate_groups
+                ]
+                failed = [
+                    item for item in reduced.candidates if item.status == "failed"
+                ]
+                successful_total += len(successful)
+                failed_total += len(failed)
+                deduplicated_total += (
+                    len(reduced.duplicate_groups) + len(reduced.excluded_groups)
+                )
+                unique_total += len(reduced.duplicate_groups)
+                excluded_groups_total += len(reduced.excluded_groups)
+                attempt_excluded_ids = [
+                    candidate_id
+                    for excluded in reduced.excluded_groups
+                    for candidate_id in excluded.candidate_ids
+                ]
+                excluded_candidate_ids.extend(attempt_excluded_ids)
+                loop_exclusions = [
+                    item
+                    for item in reduced.excluded_groups
+                    if item.reason == "equivalent_to_loop_input"
+                ]
+                previous_exclusions = [
+                    item
+                    for item in reduced.excluded_groups
+                    if item.reason == "equivalent_to_previous_iteration"
+                ]
+                excluded_loop_input_groups += len(loop_exclusions)
+                excluded_loop_input_candidates += sum(
+                    len(item.candidate_ids) for item in loop_exclusions
+                )
+                excluded_previous_groups += len(previous_exclusions)
+                excluded_previous_candidates += sum(
+                    len(item.candidate_ids) for item in previous_exclusions
+                )
+
+                if representatives:
+                    attempt_status = "novel_candidates_found"
+                elif successful:
+                    attempt_status = "history_equivalent"
+                else:
+                    attempt_status = "all_failed"
+                attempt_payload = {
+                    "attempt": attempt_number,
+                    "mode_group_rank": group.rank,
+                    "status": attempt_status,
+                    "instability_directory": str(instability_output),
+                    "candidate_directory": str(candidate_output),
+                    "preflight": (
+                        str(soft_result.preflight_path)
+                        if soft_result.preflight_path is not None
+                        else None
+                    ),
+                    "candidate_resource_estimates": preflight_totals,
+                    "number_of_generated_candidates": generated_count,
+                    "number_of_successful_candidates": len(successful),
+                    "number_of_failed_candidates": len(failed),
+                    "number_of_deduplicated_structures": (
+                        len(reduced.duplicate_groups)
+                        + len(reduced.excluded_groups)
+                    ),
+                    "number_of_unique_candidates": len(reduced.duplicate_groups),
+                    "number_of_excluded_history_structures": len(
+                        reduced.excluded_groups
+                    ),
+                    "excluded_candidate_ids": attempt_excluded_ids,
+                    "excluded_groups": [
+                        {
+                            "candidate_ids": list(item.candidate_ids),
+                            "reason": item.reason,
+                            "matched_iteration_index": (
+                                item.matched_iteration_index
+                            ),
+                            "reference_structure": (
+                                str(item.reference_structure)
+                                if item.reference_structure is not None
+                                else None
+                            ),
+                        }
+                        for item in reduced.excluded_groups
+                    ],
+                    "failed_candidates": [
+                        {
+                            "candidate_id": item.candidate_id,
+                            "error": item.error,
+                        }
+                        for item in failed
+                    ],
+                }
+                attempts.append(attempt_payload)
+                _write_mode_search_report(
+                    paths,
+                    run_config,
+                    groups,
+                    mesh,
+                    attempts=attempts,
+                    status=(
+                        "selected" if representatives else "searching"
+                    ),
+                )
+                _write_mode_preflight_summary(
+                    paths,
+                    run_config,
+                    attempts,
+                    generated_total=generated_total,
+                    candidate_atoms_total=candidate_atoms_total,
+                    maximum_atom_steps_total=maximum_atom_steps_total,
+                    peak_optimizer_state_bytes=peak_optimizer_state_bytes,
+                )
+
+                if representatives:
+                    ranking = sorted(
+                        representatives,
+                        key=lambda item: (
+                            float(item.energy_per_atom_eV),
+                            float(item.max_force_eV_per_A),
+                            item.candidate_id,
+                        ),
+                    )
+                    winner = ranking[0]
+                    winning_mode_group_rank = group.rank
+                    break
+                if successful:
+                    _report(
+                        progress,
+                        f"Evaluation {iteration_index + 1}: rank {group.rank} "
+                        "produced only structures already present in the search "
+                        "history; advancing to the next ranked group.",
+                    )
+                else:
+                    _report(
+                        progress,
+                        f"Evaluation {iteration_index + 1}: every rank {group.rank} "
+                        "candidate failed; advancing to the next ranked group.",
+                    )
+
+            selection_fields = {
+                "number_of_generated_candidates": generated_total,
+                "number_of_successful_candidates": successful_total,
+                "number_of_failed_candidates": failed_total,
+                "number_of_deduplicated_structures": deduplicated_total,
+                "number_of_unique_candidates": unique_total,
+                "number_of_excluded_history_structures": excluded_groups_total,
+                "number_of_excluded_history_candidates": len(
+                    excluded_candidate_ids
                 ),
-            )
+                "number_of_excluded_loop_input_structures": (
+                    excluded_loop_input_groups
+                ),
+                "number_of_excluded_loop_input_candidates": (
+                    excluded_loop_input_candidates
+                ),
+                "number_of_excluded_previous_iteration_structures": (
+                    excluded_previous_groups
+                ),
+                "number_of_excluded_previous_iteration_candidates": (
+                    excluded_previous_candidates
+                ),
+                "excluded_candidate_ids": excluded_candidate_ids,
+                "attempted_mode_group_ranks": [
+                    item["mode_group_rank"] for item in attempts
+                ],
+                "mode_group_attempts": attempts,
+                "selected_mode_group_rank": winning_mode_group_rank,
+                "selection_report": str(paths.selection),
+                "instability_preflight": str(
+                    paths.instabilities_dir / "preflight.json"
+                ),
+                "candidate_resource_estimates": {
+                    "candidate_count": generated_total,
+                    "candidate_atoms": candidate_atoms_total,
+                    "maximum_atom_steps": maximum_atom_steps_total,
+                    "peak_optimizer_state_bytes": peak_optimizer_state_bytes,
+                    "peak_optimizer_state_mib": (
+                        peak_optimizer_state_bytes / 1024**2
+                    ),
+                },
+            }
+
+            if winner is None:
+                if successful_total == 0:
+                    raise CandidateReductionError(
+                        "all candidate relaxations failed across mode-group ranks "
+                        + ", ".join(str(item.rank) for item in groups_to_try)
+                    )
+                termination_reason = "all_attempted_mode_groups_exhausted"
+                matched_iterations = sorted(
+                    {
+                        int(item["matched_iteration_index"])
+                        for attempt in attempts
+                        for item in attempt["excluded_groups"]
+                        if item["matched_iteration_index"] is not None
+                    }
+                )
+                paths.selected_structure.unlink(missing_ok=True)
+                terminal_fields = {
+                    "selected_candidate_id": None,
+                    "selected_candidate_index": None,
+                    "selected_structure": None,
+                    "selected_energy_per_atom_eV": None,
+                    "selected_max_force_eV_per_A": None,
+                    "energy_change_per_atom_eV": None,
+                }
+                _atomic_json(
+                    paths.selection,
+                    {
+                        "status": "cycle_detected",
+                        "termination_reason": termination_reason,
+                        "loop_input_structure": str(paths.accepted_primitive),
+                        "cycle_matches_iterations": matched_iterations,
+                        "ranking": [],
+                        **selection_fields,
+                        **terminal_fields,
+                    },
+                )
+                entry = {
+                    **base_entry,
+                    **selection_fields,
+                    **terminal_fields,
+                    "status": "cycle_detected",
+                    "termination_reason": termination_reason,
+                    "cycle_matches_iteration": (
+                        matched_iterations[0] if matched_iterations else None
+                    ),
+                    "cycle_matches_iterations": matched_iterations,
+                }
+                history.append(entry)
+                _write_history(artifacts, history)
+                _finish_manifest(manifest, artifacts, "cycle_detected", history)
+                _write_mode_search_report(
+                    paths,
+                    run_config,
+                    groups,
+                    mesh,
+                    attempts=attempts,
+                    status="exhausted",
+                )
+                _report(
+                    progress,
+                    "Search stopped: every permitted mode group either failed or "
+                    "returned structures already present in the search history.",
+                )
+                return _result_from_components(
+                    "cycle_detected", evaluated, phonon, mesh, history, artifacts
+                )
+
+            assert winning_mode_group_rank is not None
             assert winner.primitive_atoms is not None
             write(paths.selected_structure, winner.primitive_atoms, format="extxyz")
             energy_change = float(winner.energy_per_atom_eV) - parent_energy_per_atom
             _report(
                 progress,
-                f"Selection: {winner.candidate_id} ranked first at "
+                f"Selection: rank {winning_mode_group_rank} candidate "
+                f"{winner.candidate_id} ranked first at "
                 f"{float(winner.energy_per_atom_eV):.8f} eV/atom "
                 f"(change {energy_change:+.8f} eV/atom).",
             )
-            ranking = sorted(
-                representatives,
-                key=lambda item: (
-                    float(item.energy_per_atom_eV),
-                    float(item.max_force_eV_per_A),
-                    item.candidate_id,
-                ),
-            )
             selection_payload = {
+                "status": "selected",
                 "selected_candidate_id": winner.candidate_id,
                 "selected_candidate_index": winner.index,
                 "selected_structure": str(paths.selected_structure),
@@ -364,62 +658,18 @@ def run_workflow(
                     }
                     for rank, item in enumerate(ranking, 1)
                 ],
+                **selection_fields,
             }
             _atomic_json(paths.selection, selection_payload)
-
-            previous_primitives = [
-                load_structure(Path(item["accepted_primitive"])) for item in history
-            ]
-            previous_primitives.append(load_structure(paths.accepted_primitive))
-            cycle_index = next(
-                (
-                    previous_index
-                    for previous_index, previous_atoms in enumerate(previous_primitives)
-                    if structures_equivalent(
-                        winner.primitive_atoms, previous_atoms, run_config
-                    )
-                ),
-                None,
-            )
-            failed_count = len(reduced.candidates) - len(successful)
-            selection_fields = {
-                "selected_candidate_id": winner.candidate_id,
-                "selected_structure": str(paths.selected_structure),
-                "selected_energy_per_atom_eV": winner.energy_per_atom_eV,
-                "selected_max_force_eV_per_A": winner.max_force_eV_per_A,
-                "energy_change_per_atom_eV": energy_change,
-                "number_of_generated_candidates": len(soft_result.candidates),
-                "number_of_successful_candidates": len(successful),
-                "number_of_failed_candidates": failed_count,
-                "number_of_unique_candidates": len(reduced.duplicate_groups),
-                "selection_report": str(paths.selection),
-            }
-            if preflight_payload is not None:
-                selection_fields.update(
-                    instability_preflight=str(soft_result.preflight_path),
-                    candidate_resource_estimates=preflight_payload["totals"],
-                    selected_mode_group_ranks=[
-                        group.rank for group in soft_result.selected_mode_groups
-                    ],
-                )
-            if cycle_index is not None:
-                entry = {
-                    **base_entry,
-                    **selection_fields,
-                    "status": "cycle_detected",
-                    "cycle_matches_iteration": cycle_index,
+            selection_fields.update(
+                {
+                    "selected_candidate_id": winner.candidate_id,
+                    "selected_structure": str(paths.selected_structure),
+                    "selected_energy_per_atom_eV": winner.energy_per_atom_eV,
+                    "selected_max_force_eV_per_A": winner.max_force_eV_per_A,
+                    "energy_change_per_atom_eV": energy_change,
                 }
-                history.append(entry)
-                _write_history(artifacts, history)
-                _finish_manifest(manifest, artifacts, "cycle_detected", history)
-                _report(
-                    progress,
-                    f"Search stopped: selected structure matches evaluation "
-                    f"{cycle_index + 1}; cycle detected.",
-                )
-                return _result_from_components(
-                    "cycle_detected", evaluated, phonon, mesh, history, artifacts
-                )
+            )
 
             history.append({**base_entry, **selection_fields, "status": "selected"})
             _write_history(artifacts, history)
@@ -868,6 +1118,7 @@ def _finish_manifest(
     status: RunStatus,
     history: list[dict[str, Any]],
 ) -> None:
+    last = history[-1]
     manifest.update(
         status=status,
         stage="complete",
@@ -880,12 +1131,61 @@ def _finish_manifest(
         {
             "status": status,
             "number_of_evaluations": len(history),
-            "minimum_frequency_thz": history[-1]["minimum_frequency_thz"],
+            "minimum_frequency_thz": last["minimum_frequency_thz"],
             "final_structure": (
                 str(artifacts.final_structure) if status == "stable" else None
             ),
             "history": str(artifacts.history),
             "termination": status,
+            "termination_reason": last.get("termination_reason", status),
+            "attempted_mode_group_ranks": last.get(
+                "attempted_mode_group_ranks", []
+            ),
+            "selected_mode_group_rank": last.get("selected_mode_group_rank"),
+            "mode_group_attempts": last.get("mode_group_attempts", []),
+            "number_of_generated_candidates": last.get(
+                "number_of_generated_candidates", 0
+            ),
+            "number_of_successful_candidates": last.get(
+                "number_of_successful_candidates", 0
+            ),
+            "number_of_failed_candidates": last.get(
+                "number_of_failed_candidates", 0
+            ),
+            "number_of_excluded_history_structures": last.get(
+                "number_of_excluded_history_structures", 0
+            ),
+            "candidate_resource_estimates": last.get(
+                "candidate_resource_estimates"
+            ),
+            "mode_group_search_history": [
+                {
+                    "iteration_index": item["index"],
+                    "attempted_mode_group_ranks": item.get(
+                        "attempted_mode_group_ranks", []
+                    ),
+                    "selected_mode_group_rank": item.get(
+                        "selected_mode_group_rank"
+                    ),
+                    "mode_group_attempts": item.get("mode_group_attempts", []),
+                    "number_of_generated_candidates": item.get(
+                        "number_of_generated_candidates", 0
+                    ),
+                    "number_of_successful_candidates": item.get(
+                        "number_of_successful_candidates", 0
+                    ),
+                    "number_of_failed_candidates": item.get(
+                        "number_of_failed_candidates", 0
+                    ),
+                    "number_of_excluded_history_structures": item.get(
+                        "number_of_excluded_history_structures", 0
+                    ),
+                    "candidate_resource_estimates": item.get(
+                        "candidate_resource_estimates"
+                    ),
+                }
+                for item in history
+            ],
         },
     )
 
@@ -937,6 +1237,89 @@ def _write_ranking_only_report(
             "mesh_numbers": mesh.mesh_numbers.tolist(),
             "soft_mode_groups": [_jsonable(asdict(group)) for group in groups],
             "generated_candidates": 0,
+        },
+    )
+
+
+def _write_mode_search_report(
+    paths: _IterationPaths,
+    config: RunConfig,
+    groups: tuple,
+    mesh: MeshData,
+    *,
+    attempts: list[dict[str, Any]],
+    status: str,
+) -> None:
+    """Persist the master ranking and sequential group-attempt provenance."""
+
+    _atomic_json(
+        paths.instabilities_dir / "soft_modes.json",
+        {
+            "schema_version": 3,
+            "status": status,
+            "selection_policy": "sequential_ranked_group_fallback",
+            "settings": config.soft_modes.model_dump(mode="json"),
+            "mesh_numbers": mesh.mesh_numbers.tolist(),
+            "soft_mode_groups": [_jsonable(asdict(group)) for group in groups],
+            "maximum_mode_groups": config.soft_modes.max_mode_groups,
+            "attempted_mode_group_ranks": [
+                item["mode_group_rank"] for item in attempts
+            ],
+            "attempts": attempts,
+            "generated_candidates": sum(
+                int(item["number_of_generated_candidates"]) for item in attempts
+            ),
+        },
+    )
+
+
+def _write_mode_preflight_summary(
+    paths: _IterationPaths,
+    config: RunConfig,
+    attempts: list[dict[str, Any]],
+    *,
+    generated_total: int,
+    candidate_atoms_total: int,
+    maximum_atom_steps_total: int,
+    peak_optimizer_state_bytes: int,
+) -> None:
+    """Persist cumulative limits and estimates for attempted mode groups."""
+
+    _atomic_json(
+        paths.instabilities_dir / "preflight.json",
+        {
+            "schema_version": 1,
+            "status": "accepted",
+            "selection_policy": "sequential_ranked_group_fallback",
+            "limits": {
+                "max_mode_groups": config.soft_modes.max_mode_groups,
+                "max_candidates_per_iteration": (
+                    config.search.max_candidates_per_iteration
+                ),
+                "max_candidate_atoms": config.search.max_candidate_atoms,
+                "max_dense_hessian_memory_mib": (
+                    config.search.max_dense_hessian_memory_mib
+                ),
+            },
+            "attempts": [
+                {
+                    "mode_group_rank": item["mode_group_rank"],
+                    "preflight": item["preflight"],
+                    "candidate_resource_estimates": item[
+                        "candidate_resource_estimates"
+                    ],
+                }
+                for item in attempts
+            ],
+            "totals": {
+                "candidate_count": generated_total,
+                "candidate_atoms": candidate_atoms_total,
+                "maximum_atom_steps": maximum_atom_steps_total,
+                "peak_optimizer_state_bytes": peak_optimizer_state_bytes,
+                "peak_optimizer_state_mib": (
+                    peak_optimizer_state_bytes / 1024**2
+                ),
+            },
         },
     )
 

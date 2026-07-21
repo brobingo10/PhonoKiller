@@ -70,10 +70,12 @@ class SoftModeConfig(StrictModel):
     frequency_threshold_thz: float = Field(default=-0.05, lt=0)
     degeneracy_tolerance_thz: float = Field(default=1.0e-3, gt=0)
     max_mode_groups: int = Field(
-        default=1,
+        default=5,
         ge=1,
-        le=1,
-        description="Exactly one strongest q-space instability basin per iteration.",
+        description=(
+            "Maximum ranked instability groups attempted sequentially per "
+            "Phonopy evaluation."
+        ),
     )
     mean_displacement_angstrom: float = Field(default=0.10, gt=0)
     phase_degrees: float = 0.0

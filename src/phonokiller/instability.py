@@ -137,8 +137,10 @@ def generate_soft_mode_candidates(
     max_candidate_atoms: int = 3500,
     max_dense_hessian_memory_mib: float = 256.0,
     source_fingerprint: str | None = None,
+    selected_group_rank: int = 1,
+    candidates_already_generated: int = 0,
 ) -> SoftModeResult:
-    """Preflight and generate candidates for the strongest q-space basin."""
+    """Preflight and generate candidates for one explicitly ranked mode group."""
 
     destination = Path(output_dir).resolve()
     report_path = destination / _REPORT_NAME
@@ -148,9 +150,13 @@ def generate_soft_mode_candidates(
 
     _validate_phonon(phonon, mesh)
     groups = rank_soft_modes(mesh, config)
-    # An iteration follows exactly one basin. Re-running Phonopy after the
-    # selected structure is relaxed lets the ranking adapt to the new cell.
-    selected_groups = groups[:1]
+    selected_groups = tuple(
+        group for group in groups if group.rank == selected_group_rank
+    )
+    if not selected_groups:
+        raise SoftModeError(
+            f"unstable mode group rank {selected_group_rank} is not available"
+        )
     effective_relaxation = candidate_relaxation or CandidateRelaxationOverrides().resolve(
         RelaxationConfig()
     )
@@ -162,6 +168,7 @@ def generate_soft_mode_candidates(
         plans,
         effective_relaxation,
         max_candidates=max_candidates,
+        candidates_already_generated=candidates_already_generated,
         max_candidate_atoms=max_candidate_atoms,
         max_dense_hessian_memory_mib=max_dense_hessian_memory_mib,
     )
@@ -563,14 +570,17 @@ def _candidate_preflight_payload(
     relaxation: RelaxationConfig,
     *,
     max_candidates: int,
+    candidates_already_generated: int = 0,
     max_candidate_atoms: int,
     max_dense_hessian_memory_mib: float,
 ) -> dict[str, Any]:
     total_candidates = sum(plan.candidate_count for plan in plans)
     violations: list[str] = []
-    if total_candidates > max_candidates:
+    cumulative_candidates = candidates_already_generated + total_candidates
+    if cumulative_candidates > max_candidates:
         violations.append(
-            f"exhaustive soft-mode expansion requires {total_candidates} candidates, "
+            f"exhaustive soft-mode expansion requires {total_candidates} additional "
+            f"candidates after {candidates_already_generated} already generated, "
             f"exceeding search.max_candidates_per_iteration={max_candidates}"
         )
 
@@ -622,7 +632,7 @@ def _candidate_preflight_payload(
     return {
         "schema_version": 1,
         "status": "refused" if violations else "accepted",
-        "selection_policy": "strongest_q_space_basin",
+        "selection_policy": "sequential_ranked_group_fallback",
         "selected_basin_count": len(plans),
         "candidate_relaxation": relaxation.model_dump(mode="json"),
         "limits": {
@@ -633,6 +643,8 @@ def _candidate_preflight_payload(
         "groups": group_payloads,
         "totals": {
             "candidate_count": total_candidates,
+            "candidates_already_generated": candidates_already_generated,
+            "cumulative_candidate_count": cumulative_candidates,
             "candidate_atoms": total_candidate_atoms,
             "maximum_atom_steps": total_atom_steps,
             "peak_optimizer_state_bytes": peak_optimizer_state_bytes,

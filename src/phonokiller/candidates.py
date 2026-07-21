@@ -27,6 +27,7 @@ from .models import (
     CandidateResult,
     DistortionCandidate,
     DuplicateGroup,
+    ExcludedDuplicateGroup,
     ProgressCallback,
 )
 from .relaxation import relax_atoms
@@ -50,6 +51,8 @@ def reduce_candidates(
     output_dir: str | Path,
     *,
     iteration_index: int,
+    loop_input_structure: str | Path,
+    previous_accepted_structures: tuple[tuple[int, str | Path], ...] = (),
     resume: bool = True,
     progress: ProgressCallback | None = None,
 ) -> CandidateReductionResult:
@@ -58,6 +61,12 @@ def reduce_candidates(
     if not candidates:
         raise CandidateReductionError("no generated candidates were supplied")
     _validate_candidate_resources(candidates, config)
+    loop_input_path = Path(loop_input_structure).resolve()
+    loop_input = load_structure(loop_input_path)
+    previous_references = tuple(
+        (int(reference_index), Path(reference_path).resolve(), load_structure(reference_path))
+        for reference_index, reference_path in previous_accepted_structures
+    )
     output = Path(output_dir).resolve()
     artifacts = _artifact_paths(output)
     fingerprint_payload = {
@@ -163,16 +172,34 @@ def reduce_candidates(
                 f"Deduplication: comparing {len(successful)} successful "
                 "primitive structure(s)."
             )
-        groups, unique_structures = _deduplicate(successful, config, artifacts)
+        groups, unique_structures, excluded_groups = _deduplicate(
+            successful,
+            loop_input,
+            loop_input_path,
+            iteration_index,
+            previous_references,
+            config,
+            artifacts,
+        )
         status: Literal["complete", "partial"] = (
             "complete" if len(successful) == len(candidates) else "partial"
         )
-        _write_summary(results, groups, status, artifacts)
+        _write_summary(
+            results,
+            groups,
+            excluded_groups,
+            loop_input_path,
+            previous_references,
+            status,
+            artifacts,
+        )
         manifest.update(status=status, stage="complete", error=None)
         _atomic_json(artifacts.manifest, manifest)
         if progress is not None:
             progress(
                 f"Deduplication complete: {len(groups)} unique structure(s); "
+                f"{len(excluded_groups)} history-equivalent structure(s) "
+                "excluded; "
                 f"{len(candidates) - len(successful)} candidate failure(s)."
             )
         return CandidateReductionResult(
@@ -181,6 +208,7 @@ def reduce_candidates(
             duplicate_groups=groups,
             unique_structures=unique_structures,
             artifacts=artifacts,
+            excluded_groups=excluded_groups,
         )
     except BaseException as exc:
         manifest.update(
@@ -494,6 +522,9 @@ def _candidate_payload(
         "spacegroup_symbol": result.spacegroup_symbol,
         "duplicate_group": result.duplicate_group,
         "is_representative": result.is_representative,
+        "exclusion_reason": result.exclusion_reason,
+        "exclusion_iteration_index": result.exclusion_iteration_index,
+        "exclusion_reference_structure": result.exclusion_reference_structure,
         "error": result.error,
     }
     if tokens is not None:
@@ -541,9 +572,23 @@ def _archive_failed_result(path: Path) -> None:
 
 def _deduplicate(
     successful: list[_SuccessfulCandidate],
+    loop_input: Atoms,
+    loop_input_path: Path,
+    iteration_index: int,
+    previous_references: tuple[tuple[int, Path, Atoms], ...],
     config: RunConfig,
     artifacts: CandidateReductionArtifactPaths,
-) -> tuple[list[DuplicateGroup], list[Atoms]]:
+) -> tuple[
+    list[DuplicateGroup],
+    list[Atoms],
+    list[ExcludedDuplicateGroup],
+]:
+    for item in successful:
+        item.result.duplicate_group = None
+        item.result.is_representative = False
+        item.result.exclusion_reason = None
+        item.result.exclusion_iteration_index = None
+        item.result.exclusion_reference_structure = None
     all_tokens = sorted({token for item in successful for token in item.decoration_tokens})
     if len(all_tokens) > 118:
         raise CandidateReductionError("more than 118 decorated site types cannot be compared")
@@ -580,8 +625,10 @@ def _deduplicate(
         old.unlink()
     groups: list[DuplicateGroup] = []
     structures: list[Atoms] = []
+    excluded_groups: list[ExcludedDuplicateGroup] = []
     payloads: list[dict[str, Any]] = []
-    for group_index, members in enumerate(components):
+    excluded_payloads: list[dict[str, Any]] = []
+    for members in components:
         representative_position = min(
             members,
             key=lambda item: (
@@ -592,10 +639,68 @@ def _deduplicate(
         )
         representative = successful[representative_position].result
         member_indices = tuple(sorted(successful[item].result.index for item in members))
+        candidate_ids = tuple(
+            sorted(successful[item].result.candidate_id for item in members)
+        )
+        primitive = representative.primitive_atoms
+        assert primitive is not None
+        matched_reference: tuple[str, int, Path] | None = None
+        if structures_equivalent(primitive, loop_input, config):
+            matched_reference = (
+                "equivalent_to_loop_input",
+                iteration_index,
+                loop_input_path,
+            )
+        else:
+            for reference_index, reference_path, reference_atoms in previous_references:
+                if structures_equivalent(primitive, reference_atoms, config):
+                    matched_reference = (
+                        "equivalent_to_previous_iteration",
+                        reference_index,
+                        reference_path,
+                    )
+                    break
+        if matched_reference is not None:
+            exclusion_index = len(excluded_groups)
+            reason, matched_iteration_index, reference_structure = matched_reference
+            for member in members:
+                successful[member].result.exclusion_reason = reason
+                successful[member].result.exclusion_iteration_index = (
+                    matched_iteration_index
+                )
+                successful[member].result.exclusion_reference_structure = str(
+                    reference_structure
+                )
+            excluded_groups.append(
+                ExcludedDuplicateGroup(
+                    index=exclusion_index,
+                    representative_index=representative.index,
+                    member_indices=member_indices,
+                    candidate_ids=candidate_ids,
+                    reason=reason,
+                    matched_iteration_index=matched_iteration_index,
+                    reference_structure=reference_structure,
+                )
+            )
+            excluded_payloads.append(
+                {
+                    "excluded_group_index": exclusion_index,
+                    "representative_index": representative.index,
+                    "member_indices": list(member_indices),
+                    "candidate_ids": list(candidate_ids),
+                    "representative_candidate_id": representative.candidate_id,
+                    "reason": reason,
+                    "matched_iteration_index": matched_iteration_index,
+                    "reference_structure": str(reference_structure),
+                }
+            )
+            continue
+
+        group_index = len(groups)
         for member in members:
             successful[member].result.duplicate_group = group_index
         representative.is_representative = True
-        structure = representative.primitive_atoms.copy()  # type: ignore[union-attr]
+        structure = primitive.copy()
         structure_path = artifacts.unique_dir / f"unique_{group_index:04d}.extxyz"
         write(structure_path, structure, format="extxyz")
         structures.append(structure)
@@ -626,11 +731,45 @@ def _deduplicate(
         artifacts.deduplication,
         {
             "number_of_successful_candidates": len(successful),
+            "number_of_deduplicated_structures": len(components),
+            "number_of_excluded_history_structures": len(excluded_groups),
+            "number_of_excluded_loop_input_structures": sum(
+                group.reason == "equivalent_to_loop_input"
+                for group in excluded_groups
+            ),
+            "number_of_excluded_previous_iteration_structures": sum(
+                group.reason == "equivalent_to_previous_iteration"
+                for group in excluded_groups
+            ),
+            "number_of_excluded_history_candidates": sum(
+                len(group.member_indices) for group in excluded_groups
+            ),
+            "number_of_excluded_loop_input_candidates": sum(
+                len(group.member_indices)
+                for group in excluded_groups
+                if group.reason == "equivalent_to_loop_input"
+            ),
+            "number_of_excluded_previous_iteration_candidates": sum(
+                len(group.member_indices)
+                for group in excluded_groups
+                if group.reason == "equivalent_to_previous_iteration"
+            ),
             "number_of_unique_structures": len(groups),
+            "loop_input_structure": str(loop_input_path),
+            "loop_input_sha256": _hash_file(loop_input_path),
+            "previous_accepted_structures": [
+                {
+                    "iteration_index": reference_index,
+                    "structure": str(reference_path),
+                    "sha256": _hash_file(reference_path),
+                }
+                for reference_index, reference_path, _ in previous_references
+            ],
             "groups": payloads,
+            "excluded_groups": excluded_payloads,
         },
     )
-    return groups, structures
+    return groups, structures, excluded_groups
 
 
 def _comparison_atoms(
@@ -668,6 +807,9 @@ def _structures_equivalent(left: Atoms, right: Atoms, config: RunConfig) -> bool
 def _write_summary(
     results: list[CandidateResult],
     groups: list[DuplicateGroup],
+    excluded_groups: list[ExcludedDuplicateGroup],
+    loop_input_path: Path,
+    previous_references: tuple[tuple[int, Path, Atoms], ...],
     status: str,
     artifacts: CandidateReductionArtifactPaths,
 ) -> None:
@@ -679,7 +821,47 @@ def _write_summary(
             "number_of_candidates": len(results),
             "number_of_successful_candidates": len(results) - len(failed),
             "number_of_failed_candidates": len(failed),
+            "number_of_deduplicated_structures": (
+                len(groups) + len(excluded_groups)
+            ),
             "number_of_unique_structures": len(groups),
+            "number_of_excluded_history_structures": len(excluded_groups),
+            "number_of_excluded_loop_input_structures": sum(
+                group.reason == "equivalent_to_loop_input"
+                for group in excluded_groups
+            ),
+            "number_of_excluded_previous_iteration_structures": sum(
+                group.reason == "equivalent_to_previous_iteration"
+                for group in excluded_groups
+            ),
+            "number_of_excluded_history_candidates": sum(
+                len(group.member_indices) for group in excluded_groups
+            ),
+            "number_of_excluded_loop_input_candidates": sum(
+                len(group.member_indices)
+                for group in excluded_groups
+                if group.reason == "equivalent_to_loop_input"
+            ),
+            "number_of_excluded_previous_iteration_candidates": sum(
+                len(group.member_indices)
+                for group in excluded_groups
+                if group.reason == "equivalent_to_previous_iteration"
+            ),
+            "excluded_candidate_ids": [
+                candidate_id
+                for group in excluded_groups
+                for candidate_id in group.candidate_ids
+            ],
+            "loop_input_structure": str(loop_input_path),
+            "loop_input_sha256": _hash_file(loop_input_path),
+            "previous_accepted_structures": [
+                {
+                    "iteration_index": reference_index,
+                    "structure": str(reference_path),
+                    "sha256": _hash_file(reference_path),
+                }
+                for reference_index, reference_path, _ in previous_references
+            ],
             "failed_candidates": [
                 {
                     "candidate_id": item.candidate_id,

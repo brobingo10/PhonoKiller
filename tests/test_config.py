@@ -21,7 +21,7 @@ def test_unified_defaults_and_candidate_inheritance() -> None:
     assert config.phonopy.mesh_length == 100.0
     assert config.soft_modes.frequency_threshold_thz == -0.05
     assert config.soft_modes.degeneracy_tolerance_thz == 1.0e-3
-    assert config.soft_modes.max_mode_groups == 1
+    assert config.soft_modes.max_mode_groups == 5
     assert config.soft_modes.mean_displacement_angstrom == 0.1
     assert config.search.max_evaluations == 10
     assert config.search.max_candidates_per_iteration == 256
@@ -73,7 +73,7 @@ def test_candidate_overrides_layer_on_base() -> None:
         {"search": {"max_candidate_atoms": 3501}},
         {"search": {"max_dense_hessian_memory_mib": 0}},
         {"candidate_relaxation": {"max_steps": 0}},
-        {"soft_modes": {"max_mode_groups": 2}},
+        {"soft_modes": {"max_mode_groups": 0}},
     ],
 )
 def test_invalid_unified_config_is_rejected(payload) -> None:

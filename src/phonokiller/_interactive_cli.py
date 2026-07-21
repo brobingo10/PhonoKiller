@@ -539,9 +539,10 @@ def _configuration_sections() -> tuple[tuple[str, str], ...]:
         (
             "soft_modes",
             "Soft-mode settings default to a -0.05 THz stability threshold, 0.001 "
-            "THz degeneracy tolerance, the single strongest q-space basin, 0.1 "
-            "angstrom mean displacement, zero-degree phase, and 1e-8 q-point "
-            "tolerance. Use {} for defaults.",
+            "THz degeneracy tolerance, up to five sequential ranked mode-group "
+            "attempts, 0.1 angstrom mean displacement, zero-degree phase, and "
+            "1e-8 q-point tolerance. JSON keys include max_mode_groups; use {} "
+            "for defaults.",
         ),
         (
             "search",
