@@ -525,9 +525,10 @@ def _configuration_sections() -> tuple[tuple[str, str], ...]:
         ),
         (
             "candidate_relaxation",
-            "Candidate relaxation overrides inherit every omitted base relaxation "
-            "value. JSON keys are mode, optimizer, force_tolerance, and max_steps; "
-            "use {} for complete inheritance.",
+            "Candidate relaxation uses FIRE by default to keep optimizer memory "
+            "linear in atom count. Mode, force tolerance, and step count inherit "
+            "the base relaxation when omitted. JSON keys are mode, optimizer, "
+            "force_tolerance, and max_steps; use {} for these defaults.",
         ),
         (
             "phonopy",
@@ -538,14 +539,17 @@ def _configuration_sections() -> tuple[tuple[str, str], ...]:
         (
             "soft_modes",
             "Soft-mode settings default to a -0.05 THz stability threshold, 0.001 "
-            "THz degeneracy tolerance, five groups, 0.1 angstrom mean displacement, "
-            "zero-degree phase, and 1e-8 q-point tolerance. Use {} for defaults.",
+            "THz degeneracy tolerance, the single strongest q-space basin, 0.1 "
+            "angstrom mean displacement, zero-degree phase, and 1e-8 q-point "
+            "tolerance. Use {} for defaults.",
         ),
         (
             "search",
             "Search limits default to ten Phonopy evaluations and 256 candidates per "
-            "iteration. JSON keys are max_evaluations and "
-            "max_candidates_per_iteration; use {} for defaults.",
+            "iteration, at most 3500 atoms per candidate, and a 256 MiB dense-BFGS "
+            "Hessian limit. JSON keys are max_evaluations, "
+            "max_candidates_per_iteration, max_candidate_atoms, and "
+            "max_dense_hessian_memory_mib; use {} for defaults.",
         ),
         (
             "symmetry",

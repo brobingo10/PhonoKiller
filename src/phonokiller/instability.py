@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from fractions import Fraction
 import itertools
 import json
@@ -18,7 +18,11 @@ from ase.io import write
 import numpy as np
 from phonopy import Phonopy
 
-from .config import SoftModeConfig
+from .config import (
+    CandidateRelaxationOverrides,
+    RelaxationConfig,
+    SoftModeConfig,
+)
 from .exceptions import CandidateLimitError, SoftModeError
 from .models import (
     CommensurateSupercell,
@@ -29,10 +33,23 @@ from .models import (
     SoftModeResult,
 )
 from .structure import phonopy_to_ase, validate_structure
+from ._resources import candidate_resource_violations, optimizer_state_estimate
 
 
-_OUTPUT_SCHEMA = 2
+_OUTPUT_SCHEMA = 3
 _REPORT_NAME = "soft_modes.json"
+_PREFLIGHT_NAME = "preflight.json"
+
+
+@dataclass(frozen=True, slots=True)
+class _GroupGenerationPlan:
+    group: SoftModeGroup
+    rational_qpoint: tuple[Fraction, Fraction, Fraction]
+    matrix: np.ndarray
+    determinant: int
+    atom_count: int
+    direction_count: int
+    candidate_count: int
 
 
 def rank_soft_modes(
@@ -116,41 +133,69 @@ def generate_soft_mode_candidates(
     output_dir: str | Path,
     *,
     max_candidates: int,
+    candidate_relaxation: RelaxationConfig | None = None,
+    max_candidate_atoms: int = 3500,
+    max_dense_hessian_memory_mib: float = 256.0,
     source_fingerprint: str | None = None,
 ) -> SoftModeResult:
-    """Generate every signed ternary direction for selected soft groups."""
+    """Preflight and generate candidates for the strongest q-space basin."""
 
     destination = Path(output_dir).resolve()
     report_path = destination / _REPORT_NAME
+    preflight_path = destination / _PREFLIGHT_NAME
     if report_path.exists():
         return load_soft_mode_result(destination)
 
     _validate_phonon(phonon, mesh)
     groups = rank_soft_modes(mesh, config)
-    selected_groups = groups[: config.max_mode_groups]
-    count = candidate_count(selected_groups)
-    if count > max_candidates:
-        raise CandidateLimitError(
-            f"exhaustive soft-mode expansion requires {count} candidates, "
-            f"exceeding search.max_candidates_per_iteration={max_candidates}"
-        )
+    # An iteration follows exactly one basin. Re-running Phonopy after the
+    # selected structure is relaxed lets the ranking adapt to the new cell.
+    selected_groups = groups[:1]
+    effective_relaxation = candidate_relaxation or CandidateRelaxationOverrides().resolve(
+        RelaxationConfig()
+    )
+    plans = tuple(
+        _plan_group_generation(phonon, mesh, group, config)
+        for group in selected_groups
+    )
+    preflight = _candidate_preflight_payload(
+        plans,
+        effective_relaxation,
+        max_candidates=max_candidates,
+        max_candidate_atoms=max_candidate_atoms,
+        max_dense_hessian_memory_mib=max_dense_hessian_memory_mib,
+    )
 
     destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists() and any(destination.iterdir()):
-        raise SoftModeError(
-            f"nonempty instability output has no complete report: {destination}"
+    if destination.exists():
+        if not destination.is_dir():
+            raise SoftModeError(f"instability output is not a directory: {destination}")
+        unexpected = [
+            item for item in destination.iterdir() if item.name != _PREFLIGHT_NAME
+        ]
+        if unexpected:
+            raise SoftModeError(
+                f"nonempty instability output has no complete report: {destination}"
+            )
+    destination.mkdir(exist_ok=True)
+    _write_json(preflight_path, preflight)
+    violations = tuple(str(value) for value in preflight["violations"])
+    if violations:
+        raise CandidateLimitError(
+            "candidate resource preflight refused generation: " + "; ".join(violations)
         )
+
     temporary = Path(
         tempfile.mkdtemp(prefix=f".{destination.name}-tmp-", dir=destination.parent)
     )
     supercells: list[CommensurateSupercell] = []
     candidates: list[DistortionCandidate] = []
     try:
-        for group in selected_groups:
+        _write_json(temporary / _PREFLIGHT_NAME, preflight)
+        for plan in plans:
             supercell, generated = _generate_group_candidates(
                 phonon,
-                mesh,
-                group,
+                plan,
                 config,
                 temporary,
                 destination,
@@ -162,6 +207,7 @@ def generate_soft_mode_candidates(
             "status": "complete",
             "source_fingerprint": source_fingerprint,
             "settings": config.model_dump(mode="json"),
+            "resource_preflight": str(preflight_path),
             "counts": {
                 "soft_mode_groups": len(groups),
                 "selected_mode_groups": len(selected_groups),
@@ -174,6 +220,7 @@ def generate_soft_mode_candidates(
         }
         _write_json(temporary / _REPORT_NAME, payload)
         if destination.exists():
+            preflight_path.unlink(missing_ok=True)
             destination.rmdir()
         os.replace(temporary, destination)
     except BaseException:
@@ -186,6 +233,7 @@ def generate_soft_mode_candidates(
         candidates=tuple(candidates),
         output_dir=destination,
         report_path=report_path,
+        preflight_path=preflight_path,
     )
 
 
@@ -240,6 +288,7 @@ def load_soft_mode_result(output_dir: str | Path) -> SoftModeResult:
         candidates=candidates,
         output_dir=destination,
         report_path=report_path,
+        preflight_path=destination / _PREFLIGHT_NAME,
     )
 
 
@@ -484,6 +533,123 @@ def _integer_determinant(matrix: np.ndarray) -> int:
     )
 
 
+def _plan_group_generation(
+    phonon: Phonopy,
+    mesh: MeshData,
+    group: SoftModeGroup,
+    settings: SoftModeConfig,
+) -> _GroupGenerationPlan:
+    rational_qpoint = _rational_qpoint(
+        group.qpoint, mesh.mesh_numbers, settings.qpoint_tolerance
+    )
+    matrix = _minimum_commensurate_supercell(
+        rational_qpoint, np.asarray(phonon.primitive.cell, dtype=float)
+    )
+    determinant = _integer_determinant(matrix)
+    direction_count = (3**group.degeneracy - 1) // 2
+    return _GroupGenerationPlan(
+        group=group,
+        rational_qpoint=rational_qpoint,
+        matrix=matrix,
+        determinant=determinant,
+        atom_count=len(phonon.primitive) * determinant,
+        direction_count=direction_count,
+        candidate_count=2 * direction_count,
+    )
+
+
+def _candidate_preflight_payload(
+    plans: tuple[_GroupGenerationPlan, ...],
+    relaxation: RelaxationConfig,
+    *,
+    max_candidates: int,
+    max_candidate_atoms: int,
+    max_dense_hessian_memory_mib: float,
+) -> dict[str, Any]:
+    total_candidates = sum(plan.candidate_count for plan in plans)
+    violations: list[str] = []
+    if total_candidates > max_candidates:
+        violations.append(
+            f"exhaustive soft-mode expansion requires {total_candidates} candidates, "
+            f"exceeding search.max_candidates_per_iteration={max_candidates}"
+        )
+
+    group_payloads: list[dict[str, Any]] = []
+    total_candidate_atoms = 0
+    total_atom_steps = 0
+    summed_optimizer_state_bytes = 0
+    peak_optimizer_state_bytes = 0
+    for plan in plans:
+        estimate = optimizer_state_estimate(plan.atom_count, relaxation.optimizer)
+        group_violations = candidate_resource_violations(
+            plan.atom_count,
+            relaxation.optimizer,
+            max_candidate_atoms=max_candidate_atoms,
+            max_dense_hessian_memory_mib=max_dense_hessian_memory_mib,
+            group_rank=plan.group.rank,
+        )
+        violations.extend(group_violations)
+        candidate_atoms = plan.candidate_count * plan.atom_count
+        atom_steps = candidate_atoms * relaxation.max_steps
+        optimizer_state_bytes = plan.candidate_count * int(estimate["bytes"])
+        total_candidate_atoms += candidate_atoms
+        total_atom_steps += atom_steps
+        summed_optimizer_state_bytes += optimizer_state_bytes
+        peak_optimizer_state_bytes = max(
+            peak_optimizer_state_bytes, int(estimate["bytes"])
+        )
+        group_payloads.append(
+            {
+                "group_rank": plan.group.rank,
+                "qpoint": list(plan.group.qpoint),
+                "qpoint_fractions": [str(value) for value in plan.rational_qpoint],
+                "band_indices": list(plan.group.band_indices),
+                "minimum_frequency_thz": plan.group.minimum_frequency_thz,
+                "degeneracy": plan.group.degeneracy,
+                "supercell_matrix": plan.matrix.tolist(),
+                "supercell_determinant": plan.determinant,
+                "atoms_per_candidate": plan.atom_count,
+                "direction_count_modulo_sign": plan.direction_count,
+                "physical_candidate_count": plan.candidate_count,
+                "total_candidate_atoms": candidate_atoms,
+                "maximum_atom_steps": atom_steps,
+                "optimizer_state_per_candidate": estimate,
+                "summed_optimizer_state_bytes": optimizer_state_bytes,
+                "violations": list(group_violations),
+            }
+        )
+
+    return {
+        "schema_version": 1,
+        "status": "refused" if violations else "accepted",
+        "selection_policy": "strongest_q_space_basin",
+        "selected_basin_count": len(plans),
+        "candidate_relaxation": relaxation.model_dump(mode="json"),
+        "limits": {
+            "max_candidates_per_iteration": max_candidates,
+            "max_candidate_atoms": max_candidate_atoms,
+            "max_dense_hessian_memory_mib": max_dense_hessian_memory_mib,
+        },
+        "groups": group_payloads,
+        "totals": {
+            "candidate_count": total_candidates,
+            "candidate_atoms": total_candidate_atoms,
+            "maximum_atom_steps": total_atom_steps,
+            "peak_optimizer_state_bytes": peak_optimizer_state_bytes,
+            "peak_optimizer_state_mib": peak_optimizer_state_bytes / 1024**2,
+            "summed_optimizer_state_bytes": summed_optimizer_state_bytes,
+            "summed_optimizer_state_mib": summed_optimizer_state_bytes / 1024**2,
+        },
+        "violations": violations,
+        "notes": [
+            "Atom-step totals assume every candidate reaches the configured max_steps.",
+            "Optimizer estimates exclude calculator model, graph, and activation memory.",
+            "Optimizer byte estimates are raw arrays; serialized checkpoints may be larger.",
+            "Candidates run sequentially, so peak optimizer state is per candidate.",
+        ],
+    }
+
+
 def _validate_phonon(phonon: Phonopy, mesh: MeshData) -> None:
     _validated_mesh_arrays(mesh)
     force_constants = phonon.force_constants
@@ -493,25 +659,21 @@ def _validate_phonon(phonon: Phonopy, mesh: MeshData) -> None:
 
 def _generate_group_candidates(
     phonon: Phonopy,
-    mesh: MeshData,
-    group: SoftModeGroup,
+    plan: _GroupGenerationPlan,
     settings: SoftModeConfig,
     temporary_root: Path,
     public_root: Path,
 ) -> tuple[CommensurateSupercell, tuple[DistortionCandidate, ...]]:
-    rational_qpoint = _rational_qpoint(
-        group.qpoint, mesh.mesh_numbers, settings.qpoint_tolerance
-    )
-    matrix = _minimum_commensurate_supercell(
-        rational_qpoint, np.asarray(phonon.primitive.cell, dtype=float)
-    )
-    determinant = _integer_determinant(matrix)
+    group = plan.group
+    rational_qpoint = plan.rational_qpoint
+    matrix = plan.matrix
+    determinant = plan.determinant
     qpoint = np.asarray([float(value) for value in rational_qpoint], dtype=float)
     group_name = f"group_{group.rank:03d}_{_qpoint_slug(rational_qpoint)}"
     working_dir = temporary_root / group_name
     public_dir = public_root / group_name
     working_dir.mkdir(parents=True)
-    expected_atoms = len(phonon.primitive) * determinant
+    expected_atoms = plan.atom_count
 
     phonon_modes = [
         [qpoint.tolist(), int(band_index), 1.0, settings.phase_degrees]

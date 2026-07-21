@@ -21,10 +21,12 @@ def test_unified_defaults_and_candidate_inheritance() -> None:
     assert config.phonopy.mesh_length == 100.0
     assert config.soft_modes.frequency_threshold_thz == -0.05
     assert config.soft_modes.degeneracy_tolerance_thz == 1.0e-3
-    assert config.soft_modes.max_mode_groups == 5
+    assert config.soft_modes.max_mode_groups == 1
     assert config.soft_modes.mean_displacement_angstrom == 0.1
     assert config.search.max_evaluations == 10
     assert config.search.max_candidates_per_iteration == 256
+    assert config.search.max_candidate_atoms == 3500
+    assert config.search.max_dense_hessian_memory_mib == 256.0
     assert config.calculator.factory == DEFAULT_MACE_FACTORY
     assert config.calculator.kwargs == {
         "model": DEFAULT_MACE_MODEL,
@@ -32,7 +34,11 @@ def test_unified_defaults_and_candidate_inheritance() -> None:
         "default_dtype": DEFAULT_MACE_DTYPE,
         "dispersion": DEFAULT_MACE_DISPERSION,
     }
-    assert config.effective_candidate_relaxation() == config.relaxation
+    candidate_relaxation = config.effective_candidate_relaxation()
+    assert candidate_relaxation.mode == config.relaxation.mode
+    assert candidate_relaxation.optimizer.value == "FIRE"
+    assert candidate_relaxation.force_tolerance == config.relaxation.force_tolerance
+    assert candidate_relaxation.max_steps == config.relaxation.max_steps
 
 
 def test_candidate_overrides_layer_on_base() -> None:
@@ -63,7 +69,11 @@ def test_candidate_overrides_layer_on_base() -> None:
         {"soft_modes": {"mean_displacement_angstrom": -0.1}},
         {"search": {"max_evaluations": 0}},
         {"search": {"max_candidates_per_iteration": 0}},
+        {"search": {"max_candidate_atoms": 0}},
+        {"search": {"max_candidate_atoms": 3501}},
+        {"search": {"max_dense_hessian_memory_mib": 0}},
         {"candidate_relaxation": {"max_steps": 0}},
+        {"soft_modes": {"max_mode_groups": 2}},
     ],
 )
 def test_invalid_unified_config_is_rejected(payload) -> None:

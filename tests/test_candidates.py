@@ -7,9 +7,11 @@ from ase import Atoms
 from ase.build import bulk
 from ase.io import write
 import numpy as np
+import pytest
 
 from phonokiller import RunConfig
 from phonokiller.candidates import make_nonideal_primitive, reduce_candidates
+from phonokiller.exceptions import CandidateReductionError
 from phonokiller.models import DisplacementStatistics, DistortionCandidate
 from phonokiller.relaxation import _calculator_device_info
 from tests.helpers import OffsetEnergyCalculator, RaisingCalculator, ZeroCalculator
@@ -171,3 +173,34 @@ def test_partial_batch_retries_only_failure(tmp_path) -> None:
     assert complete.status == "complete"
     assert factory.calls.count(0) == 1
     assert factory.calls.count(1) == 2
+
+
+def test_candidate_atom_cap_is_checked_before_output_or_calculator(tmp_path) -> None:
+    structure = tmp_path / "oversized.extxyz"
+    atoms = Atoms(
+        numbers=np.ones(3501, dtype=int),
+        positions=np.column_stack(
+            [np.arange(3501, dtype=float), np.zeros(3501), np.zeros(3501)]
+        ),
+        cell=[3502.0, 2.0, 2.0],
+        pbc=True,
+    )
+    write(structure, atoms)
+    called = False
+
+    def factory(*, context):
+        nonlocal called
+        called = True
+        return ZeroCalculator()
+
+    output = tmp_path / "results"
+    with pytest.raises(CandidateReductionError, match="requires 3501 atoms"):
+        reduce_candidates(
+            (candidate(structure, "too-large"),),
+            factory,
+            config(),
+            output,
+            iteration_index=0,
+        )
+    assert not called
+    assert not output.exists()

@@ -30,6 +30,7 @@ from .models import (
     ProgressCallback,
 )
 from .relaxation import relax_atoms
+from ._resources import candidate_resource_violations
 from .structure import load_structure, validate_structure
 
 
@@ -56,6 +57,7 @@ def reduce_candidates(
 
     if not candidates:
         raise CandidateReductionError("no generated candidates were supplied")
+    _validate_candidate_resources(candidates, config)
     output = Path(output_dir).resolve()
     artifacts = _artifact_paths(output)
     fingerprint_payload = {
@@ -72,6 +74,12 @@ def reduce_candidates(
         ),
         "symmetry": config.symmetry.model_dump(mode="json"),
         "deduplication": config.deduplication.model_dump(mode="json"),
+        "candidate_resource_limits": {
+            "max_candidate_atoms": config.search.max_candidate_atoms,
+            "max_dense_hessian_memory_mib": (
+                config.search.max_dense_hessian_memory_mib
+            ),
+        },
         "iteration_index": iteration_index,
     }
     fingerprint = _hash_payload(fingerprint_payload)
@@ -263,6 +271,12 @@ def _prepare_output(
             ),
             "symmetry": config.symmetry.model_dump(mode="json"),
             "deduplication": config.deduplication.model_dump(mode="json"),
+            "candidate_resource_limits": {
+                "max_candidate_atoms": config.search.max_candidate_atoms,
+                "max_dense_hessian_memory_mib": (
+                    config.search.max_dense_hessian_memory_mib
+                ),
+            },
         },
     )
     _atomic_json(artifacts.fingerprint, fingerprint_payload)
@@ -296,9 +310,9 @@ def _process_candidate(
     iteration_index: int,
     progress: ProgressCallback | None,
 ) -> _SuccessfulCandidate:
+    atoms = load_structure(candidate.structure_path)
     directory = _candidate_dir(artifacts, candidate_index)
     directory.mkdir(parents=True, exist_ok=True)
-    atoms = load_structure(candidate.structure_path)
     original_composition = Counter(_decoration_tokens(atoms))
     write(directory / "input.extxyz", atoms, format="extxyz")
     relaxation_dir = directory / "relaxation"
@@ -343,6 +357,48 @@ def _process_candidate(
     )
     _atomic_json(_result_path(artifacts, candidate_index), _candidate_payload(result, tokens))
     return _SuccessfulCandidate(result=result, decoration_tokens=tokens)
+
+
+def _validate_candidate_resources(
+    candidates: tuple[DistortionCandidate, ...], config: RunConfig
+) -> None:
+    relaxation = config.effective_candidate_relaxation()
+    violations: list[str] = []
+    for candidate in candidates:
+        atom_count = _extxyz_atom_count(candidate.structure_path)
+        item_violations = candidate_resource_violations(
+            atom_count,
+            relaxation.optimizer,
+            max_candidate_atoms=config.search.max_candidate_atoms,
+            max_dense_hessian_memory_mib=(
+                config.search.max_dense_hessian_memory_mib
+            ),
+        )
+        violations.extend(
+            f"{candidate.candidate_id}: {message}" for message in item_violations
+        )
+    if violations:
+        raise CandidateReductionError(
+            "candidate resource validation refused relaxation: "
+            + "; ".join(violations)
+        )
+
+
+def _extxyz_atom_count(path: Path) -> int:
+    """Read the generated extxyz atom count without parsing all coordinates."""
+
+    try:
+        with path.open("r", encoding="utf-8") as stream:
+            atom_count = int(stream.readline().strip())
+    except Exception as exc:
+        raise CandidateReductionError(
+            f"cannot read generated candidate atom count from {path}: {exc}"
+        ) from exc
+    if atom_count <= 0:
+        raise CandidateReductionError(
+            f"generated candidate has an invalid atom count in {path}"
+        )
+    return atom_count
 
 
 def _make_primitive(

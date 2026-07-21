@@ -144,6 +144,7 @@ class SoftModeResult:
     candidates: tuple[DistortionCandidate, ...]
     output_dir: Path
     report_path: Path
+    preflight_path: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)

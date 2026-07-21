@@ -45,7 +45,7 @@ class CandidateRelaxationOverrides(StrictModel):
     """Optional candidate settings layered on the base relaxation settings."""
 
     mode: RelaxationMode | None = None
-    optimizer: OptimizerName | None = None
+    optimizer: OptimizerName = OptimizerName.FIRE
     force_tolerance: float | None = Field(default=None, gt=0)
     max_steps: int | None = Field(default=None, gt=0)
 
@@ -69,7 +69,12 @@ class PhonopyConfig(StrictModel):
 class SoftModeConfig(StrictModel):
     frequency_threshold_thz: float = Field(default=-0.05, lt=0)
     degeneracy_tolerance_thz: float = Field(default=1.0e-3, gt=0)
-    max_mode_groups: int = Field(default=5, gt=0)
+    max_mode_groups: int = Field(
+        default=1,
+        ge=1,
+        le=1,
+        description="Exactly one strongest q-space instability basin per iteration.",
+    )
     mean_displacement_angstrom: float = Field(default=0.10, gt=0)
     phase_degrees: float = 0.0
     qpoint_tolerance: float = Field(default=1.0e-8, gt=0)
@@ -91,6 +96,8 @@ class SoftModeConfig(StrictModel):
 class SearchConfig(StrictModel):
     max_evaluations: int = Field(default=10, gt=0)
     max_candidates_per_iteration: int = Field(default=256, gt=0)
+    max_candidate_atoms: int = Field(default=3500, gt=0, le=3500)
+    max_dense_hessian_memory_mib: float = Field(default=256.0, gt=0)
 
 
 class CalculatorConfig(StrictModel):

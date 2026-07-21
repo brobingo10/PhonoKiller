@@ -271,8 +271,30 @@ def run_workflow(
                 run_config.soft_modes,
                 paths.instabilities_dir,
                 max_candidates=run_config.search.max_candidates_per_iteration,
+                candidate_relaxation=(
+                    run_config.effective_candidate_relaxation()
+                ),
+                max_candidate_atoms=run_config.search.max_candidate_atoms,
+                max_dense_hessian_memory_mib=(
+                    run_config.search.max_dense_hessian_memory_mib
+                ),
                 source_fingerprint=manifest["fingerprint"],
             )
+            preflight_payload = None
+            if (
+                soft_result.preflight_path is not None
+                and soft_result.preflight_path.exists()
+            ):
+                preflight_payload = _read_json(soft_result.preflight_path)
+                preflight_totals = preflight_payload["totals"]
+                _report(
+                    progress,
+                    f"Evaluation {iteration_index + 1}: resource preflight accepted "
+                    f"{int(preflight_totals['candidate_count'])} candidate(s), "
+                    f"{int(preflight_totals['candidate_atoms'])} total candidate "
+                    f"atoms, and at most "
+                    f"{int(preflight_totals['maximum_atom_steps'])} atom-steps.",
+                )
             _report(
                 progress,
                 f"Evaluation {iteration_index + 1}: generated "
@@ -372,6 +394,14 @@ def run_workflow(
                 "number_of_unique_candidates": len(reduced.duplicate_groups),
                 "selection_report": str(paths.selection),
             }
+            if preflight_payload is not None:
+                selection_fields.update(
+                    instability_preflight=str(soft_result.preflight_path),
+                    candidate_resource_estimates=preflight_payload["totals"],
+                    selected_mode_group_ranks=[
+                        group.rank for group in soft_result.selected_mode_groups
+                    ],
+                )
             if cycle_index is not None:
                 entry = {
                     **base_entry,

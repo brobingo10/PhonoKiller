@@ -9,7 +9,12 @@ import pytest
 from phonopy import Phonopy
 from phonopy.structure.atoms import PhonopyAtoms
 
-from phonokiller import CandidateLimitError, SoftModeConfig
+from phonokiller import (
+    CandidateLimitError,
+    OptimizerName,
+    RelaxationConfig,
+    SoftModeConfig,
+)
 import phonokiller.instability as instability
 from phonokiller.instability import (
     _integer_determinant,
@@ -146,6 +151,17 @@ def test_generate_exhaustive_candidates_with_exact_mean(tmp_path) -> None:
         assert candidate.displacement_statistics.mean_angstrom == pytest.approx(0.1)
     report = json.loads(result.report_path.read_text(encoding="utf-8"))
     assert report["counts"]["generated_candidates"] == 26
+    preflight = json.loads(result.preflight_path.read_text(encoding="utf-8"))
+    assert preflight["status"] == "accepted"
+    assert preflight["selection_policy"] == "strongest_q_space_basin"
+    assert preflight["groups"][0]["atoms_per_candidate"] == 1
+    assert preflight["totals"]["candidate_count"] == 26
+    assert preflight["totals"]["candidate_atoms"] == 26
+    assert preflight["totals"]["maximum_atom_steps"] == 13_000
+    assert (
+        preflight["groups"][0]["optimizer_state_per_candidate"]["model"]
+        == "float64_velocity"
+    )
 
     resumed = generate_soft_mode_candidates(
         phonon,
@@ -191,4 +207,97 @@ def test_candidate_cap_fails_before_generation(tmp_path) -> None:
             output,
             max_candidates=25,
         )
-    assert not output.exists()
+    assert sorted(path.name for path in output.iterdir()) == ["preflight.json"]
+    preflight = json.loads((output / "preflight.json").read_text(encoding="utf-8"))
+    assert preflight["status"] == "refused"
+    assert preflight["totals"]["candidate_count"] == 26
+
+
+def test_only_strongest_q_space_basin_is_generated(tmp_path) -> None:
+    phonon, original = make_unstable_phonon()
+    mesh = MeshData(
+        qpoints=np.asarray([[0.0, 0.0, 0.0], [0.5, 0.0, 0.0]]),
+        weights=np.ones(2, dtype=int),
+        frequencies=np.asarray(
+            [original.frequencies[0], original.frequencies[0] + 0.1]
+        ),
+        eigenvectors=np.repeat(original.eigenvectors, 2, axis=0),
+        mesh_numbers=np.asarray([2, 1, 1]),
+        mesh_length=100.0,
+    )
+    result = generate_soft_mode_candidates(
+        phonon,
+        mesh,
+        SoftModeConfig(),
+        tmp_path / "one-basin",
+        max_candidates=256,
+    )
+    assert len(result.soft_mode_groups) == 2
+    assert [group.rank for group in result.selected_mode_groups] == [1]
+    assert len(result.supercells) == 1
+
+
+def test_atom_cap_refuses_before_modulation_or_structure_writes(
+    monkeypatch, tmp_path
+) -> None:
+    phonon, original = make_unstable_phonon()
+    mesh = MeshData(
+        qpoints=np.asarray([[1.0 / 4000.0, 0.0, 0.0]]),
+        weights=np.ones(1, dtype=int),
+        frequencies=original.frequencies,
+        eigenvectors=original.eigenvectors,
+        mesh_numbers=np.asarray([4000, 1, 1]),
+        mesh_length=100.0,
+    )
+    called = False
+
+    def unexpected(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("modulation must not run after a refused preflight")
+
+    monkeypatch.setattr(phonon, "run_modulations", unexpected)
+    output = tmp_path / "oversized"
+    with pytest.raises(CandidateLimitError, match="requires 4000 atoms"):
+        generate_soft_mode_candidates(
+            phonon,
+            mesh,
+            SoftModeConfig(),
+            output,
+            max_candidates=256,
+            max_candidate_atoms=3500,
+        )
+    assert not called
+    assert sorted(path.name for path in output.iterdir()) == ["preflight.json"]
+    preflight = json.loads((output / "preflight.json").read_text(encoding="utf-8"))
+    assert preflight["groups"][0]["atoms_per_candidate"] == 4000
+
+
+def test_explicit_bfgs_is_guarded_by_dense_hessian_estimate(tmp_path) -> None:
+    phonon, original = make_unstable_phonon()
+    mesh = MeshData(
+        qpoints=np.asarray([[1.0 / 2002.0, 0.0, 0.0]]),
+        weights=np.ones(1, dtype=int),
+        frequencies=original.frequencies,
+        eigenvectors=original.eigenvectors,
+        mesh_numbers=np.asarray([2002, 1, 1]),
+        mesh_length=100.0,
+    )
+    output = tmp_path / "bfgs-refused"
+    with pytest.raises(CandidateLimitError, match="dense BFGS Hessian"):
+        generate_soft_mode_candidates(
+            phonon,
+            mesh,
+            SoftModeConfig(),
+            output,
+            max_candidates=256,
+            candidate_relaxation=RelaxationConfig(
+                optimizer=OptimizerName.BFGS
+            ),
+            max_candidate_atoms=3500,
+            max_dense_hessian_memory_mib=256.0,
+        )
+    preflight = json.loads((output / "preflight.json").read_text(encoding="utf-8"))
+    estimate = preflight["groups"][0]["optimizer_state_per_candidate"]
+    assert estimate["model"] == "dense_float64_hessian"
+    assert estimate["mib"] > 256.0

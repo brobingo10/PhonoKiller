@@ -71,8 +71,10 @@ relaxation:
   force_tolerance: 0.005
   max_steps: 500
 
-# Unspecified values inherit from relaxation.
+# FIRE avoids the quadratic-memory Hessian used by BFGS. Other unspecified
+# candidate values inherit from relaxation.
 candidate_relaxation:
+  optimizer: FIRE
   max_steps: 800
 
 phonopy:
@@ -82,12 +84,14 @@ phonopy:
 soft_modes:
   frequency_threshold_thz: -0.05
   degeneracy_tolerance_thz: 0.001
-  max_mode_groups: 5
+  max_mode_groups: 1  # One strongest q-space basin per iteration
   mean_displacement_angstrom: 0.1
 
 search:
   max_evaluations: 10
   max_candidates_per_iteration: 256
+  max_candidate_atoms: 3500
+  max_dense_hessian_memory_mib: 256.0
 ```
 
 The finite-displacement supercell is sized automatically so all three
@@ -95,6 +99,14 @@ face-to-face spans reach the configured target. PhonoKiller passes no
 workflow-defined displacement distance, primitive matrix, symmetry tolerance,
 backend, or force-constant symmetrization options to Phonopy. The scalar mesh
 length is passed directly to Phonopy with eigenvectors enabled.
+
+Before any distortion structure is written, PhonoKiller records
+`instabilities/preflight.json`. It contains the q-commensurate atom count,
+candidate count, total candidate atoms, maximum atom-steps, and estimated ASE
+optimizer state. Generation is refused if a candidate exceeds 3500 atoms, if
+the candidate count exceeds 256, or if an explicitly selected BFGS optimizer
+would exceed the dense-Hessian memory limit. Calculator/model memory is not
+included in the optimizer estimate.
 
 ## Outputs and resume
 
